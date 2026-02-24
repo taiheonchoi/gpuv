@@ -37,26 +37,23 @@ export class SensorLinkManager {
             const batchId = data.batchId;
             const offset = batchId * 16; // 4x4 Matrix offset per instance
 
-            // Extract existing transformation components
-            // Instead of parsing entire matrices back and forth, build a new matrix locally
-            let currentPos = Vector3.Zero();
-            let currentRot = Quaternion.Identity();
-            const currentScale = Vector3.One(); // Assumes 1,1,1 for IoT moving parts
+            // Decompose existing matrix to preserve untouched components
+            const existingMatrix = Matrix.FromArray(trsData, offset);
+            const existingScale = new Vector3();
+            const existingRot = new Quaternion();
+            const existingPos = new Vector3();
+            existingMatrix.decompose(existingScale, existingRot, existingPos);
 
-            // Apply new network coordinates if provided (Lerp/Slerp ideally handled conceptually or via double-buffering target queues)
-            if (data.position) {
-                currentPos = new Vector3(data.position[0], data.position[1], data.position[2]);
-            } else {
-                // Read existing translation from column 3 of row-major WGSL matrix
-                currentPos = new Vector3(trsData[offset + 12], trsData[offset + 13], trsData[offset + 14]);
-            }
+            const currentPos = data.position
+                ? new Vector3(data.position[0], data.position[1], data.position[2])
+                : existingPos;
 
-            if (data.rotation) {
-                currentRot = new Quaternion(data.rotation[0], data.rotation[1], data.rotation[2], data.rotation[3]);
-            }
+            const currentRot = data.rotation
+                ? new Quaternion(data.rotation[0], data.rotation[1], data.rotation[2], data.rotation[3])
+                : existingRot;
 
-            // Compose final matrix
-            const transformMatrix = Matrix.Compose(currentScale, currentRot, currentPos);
+            // Compose final matrix preserving existing scale
+            const transformMatrix = Matrix.Compose(existingScale, currentRot, currentPos);
 
             // Re-write straight into memory segment
             transformMatrix.copyToArray(trsData, offset);

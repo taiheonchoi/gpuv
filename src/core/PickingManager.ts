@@ -13,6 +13,7 @@ export class PickingManager {
 
     private _width: number;
     private _height: number;
+    private _pickInProgress = false;
 
     constructor(engine: WebGPUEngine) {
         this._engine = engine;
@@ -76,28 +77,39 @@ export class PickingManager {
             return 0;
         }
 
-        const commandEncoder = this._device.createCommandEncoder();
+        // Prevent concurrent mapAsync — WebGPU rejects mapping an already-pending/mapped buffer
+        if (this._pickInProgress) return 0;
+        this._pickInProgress = true;
 
-        // Buffer limits extraction of exactly 1 hardware pixel (4 bytes) safely against aligned widths
-        commandEncoder.copyTextureToBuffer(
-            { texture: this._pickingTexture, origin: [x, y, 0] },
-            { buffer: this._readBuffer, bytesPerRow: 256 },
-            { width: 1, height: 1, depthOrArrayLayers: 1 }
-        );
+        try {
+            const commandEncoder = this._device.createCommandEncoder();
 
-        this._device.queue.submit([commandEncoder.finish()]);
+            // Buffer limits extraction of exactly 1 hardware pixel (4 bytes) safely against aligned widths
+            commandEncoder.copyTextureToBuffer(
+                { texture: this._pickingTexture, origin: [x, y, 0] },
+                { buffer: this._readBuffer, bytesPerRow: 256 },
+                { width: 1, height: 1, depthOrArrayLayers: 1 }
+            );
 
-        // Trigger safe Read Map sequence bridging the hardware to standard DOM typed streams
-        await this._readBuffer.mapAsync(GPUMapMode.READ);
-        const mappedData = this._readBuffer.getMappedRange();
+            this._device.queue.submit([commandEncoder.finish()]);
 
-        // Output mapped standard 32-bit Uint index array pointing to offset 0 resolving pixel value
-        const copyArray = new Uint32Array(mappedData);
-        const batchId = copyArray[0];
+            // Trigger safe Read Map sequence bridging the hardware to standard DOM typed streams
+            await this._readBuffer.mapAsync(GPUMapMode.READ);
+            const mappedData = this._readBuffer.getMappedRange();
 
-        // Decapitalize lock preventing VRAM memory hoarding
-        this._readBuffer.unmap();
+            // Output mapped standard 32-bit Uint index array pointing to offset 0 resolving pixel value
+            const copyArray = new Uint32Array(mappedData);
+            const batchId = copyArray[0];
 
-        return batchId;
+            // Decapitalize lock preventing VRAM memory hoarding
+            this._readBuffer.unmap();
+
+            return batchId;
+        } catch (e) {
+            console.warn('PickingManager: pickAsync failed', e);
+            return 0;
+        } finally {
+            this._pickInProgress = false;
+        }
     }
 }

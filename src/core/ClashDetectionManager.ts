@@ -1,5 +1,6 @@
 import { WebGPUEngine, StorageBuffer, Constants, Vector3 } from '@babylonjs/core';
 import { ComputeCullingManager } from './ComputeCullingManager';
+import { SensorLinkManager } from './SensorLinkManager';
 
 export interface DynamicObjectData {
     id: string;
@@ -18,16 +19,25 @@ export class ClashDetectionManager {
     // Buffer references to push physical locations of Cranes/Robots to WebGPU
     public dynamicObjectsBuffer!: StorageBuffer;
 
-    // Clash Registry (Outputs instances that mathematically breached interference)
-    // Structured: [ClashCount (Uint32), ...ClashBatchIDs[]]
-    public clashResultBuffer!: StorageBuffer;
-    private _clashReadBuffer!: GPUBuffer;
+    // Clash Registry: separate buffers matching WGSL binding(3) and binding(4)
+    public clashCountBuffer!: StorageBuffer;   // binding(3): atomic<u32> clash count
+    public clashIndicesBuffer!: StorageBuffer;  // binding(4): array<u32> clash instance indices
+    private _clashCountReadBuffer!: GPUBuffer;
+    private _clashIndicesReadBuffer!: GPUBuffer;
 
     private _dynamicList: DynamicObjectData[] = [];
     private readonly MAX_CLASHES = 10000; // Limit readback size to avoid CPU stalling
 
     // Pre-allocated zero buffer for clearing atomic counters (avoids per-frame GPU buffer creation)
     private _zeroBuffer!: GPUBuffer;
+    private _isAnalyzing = false;
+
+    // Reference to SensorLinkManager for CPU-side clash state coherence
+    private _sensorManager: SensorLinkManager | null = null;
+
+    public setSensorManager(sensorManager: SensorLinkManager): void {
+        this._sensorManager = sensorManager;
+    }
 
     constructor(engine: WebGPUEngine, _cullingManager: ComputeCullingManager) {
         this._engine = engine;
@@ -48,12 +58,17 @@ export class ClashDetectionManager {
         // Up to 64 dynamic entities at a time (Center Vec3 + Radius = 16 bytes each)
         this.dynamicObjectsBuffer = new StorageBuffer(this._engine, 64 * 16, flags);
 
-        // Output atomic count placeholder + space for 10000 resulting Uint32 indices
-        this.clashResultBuffer = new StorageBuffer(this._engine, 4 + this.MAX_CLASHES * 4, flags);
+        // Separate buffers for atomic count and indices — matches WGSL binding(3) and binding(4)
+        this.clashCountBuffer = new StorageBuffer(this._engine, 4, flags);
+        this.clashIndicesBuffer = new StorageBuffer(this._engine, this.MAX_CLASHES * 4, flags);
 
-        // MapAsync requires a COPY_DST | MAP_READ formatted buffer matching exactly
-        this._clashReadBuffer = this._device.createBuffer({
-            size: 4 + this.MAX_CLASHES * 4,
+        // MapAsync requires COPY_DST | MAP_READ formatted buffers
+        this._clashCountReadBuffer = this._device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        this._clashIndicesReadBuffer = this._device.createBuffer({
+            size: this.MAX_CLASHES * 4,
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
         });
     }
@@ -90,7 +105,7 @@ export class ClashDetectionManager {
         // 1. Clear atomic result count to 0 using pre-allocated zero buffer
         commandEncoder.copyBufferToBuffer(
             this._zeroBuffer, 0,
-            (this.clashResultBuffer.getBuffer() as any).underlyingResource as GPUBuffer, 0,
+            (this.clashCountBuffer.getBuffer() as any).underlyingResource as GPUBuffer, 0,
             4
         );
 
@@ -109,28 +124,59 @@ export class ClashDetectionManager {
      * @returns Array of breached BatchIDs
      */
     public async analyzeInterferenceAsync(): Promise<number[]> {
+        // Prevent concurrent mapAsync — WebGPU rejects mapping an already-pending/mapped buffer
+        if (this._isAnalyzing) return [];
+        this._isAnalyzing = true;
+
+        try {
         const commandEncoder = this._device.createCommandEncoder();
 
+        // Copy count and indices from separate GPU buffers to their respective read buffers
         commandEncoder.copyBufferToBuffer(
-            (this.clashResultBuffer.getBuffer() as any).underlyingResource as GPUBuffer, 0,
-            this._clashReadBuffer, 0,
-            this._clashReadBuffer.size
+            (this.clashCountBuffer.getBuffer() as any).underlyingResource as GPUBuffer, 0,
+            this._clashCountReadBuffer, 0,
+            4
+        );
+        commandEncoder.copyBufferToBuffer(
+            (this.clashIndicesBuffer.getBuffer() as any).underlyingResource as GPUBuffer, 0,
+            this._clashIndicesReadBuffer, 0,
+            this._clashIndicesReadBuffer.size
         );
         this._device.queue.submit([commandEncoder.finish()]);
 
-        await this._clashReadBuffer.mapAsync(GPUMapMode.READ);
-        const bufferView = new Uint32Array(this._clashReadBuffer.getMappedRange());
+        // Read the clash count
+        await this._clashCountReadBuffer.mapAsync(GPUMapMode.READ);
+        const countView = new Uint32Array(this._clashCountReadBuffer.getMappedRange());
+        const clashCount = Math.min(countView[0], this.MAX_CLASHES);
+        this._clashCountReadBuffer.unmap();
 
-        const clashCount = Math.min(bufferView[0], this.MAX_CLASHES);
-        const results = [];
-
-        // Slice the memory exactly up to the tracked collision counts
-        for (let i = 0; i < clashCount; i++) {
-            results.push(bufferView[i + 1]);
+        // Read the clash indices
+        const results: number[] = [];
+        if (clashCount > 0) {
+            await this._clashIndicesReadBuffer.mapAsync(GPUMapMode.READ);
+            const indicesView = new Uint32Array(this._clashIndicesReadBuffer.getMappedRange());
+            for (let i = 0; i < clashCount; i++) {
+                results.push(indicesView[i]);
+            }
+            this._clashIndicesReadBuffer.unmap();
         }
 
-        this._clashReadBuffer.unmap();
+        // Sync clash state to CPU-side buffer so AppearanceManager flushes don't overwrite GPU-written 2.0 values
+        if (this._sensorManager && results.length > 0) {
+            const stateBuffer = this._sensorManager.getSensorStateBufferData();
+            for (const idx of results) {
+                if (idx >= 0 && idx < stateBuffer.length) {
+                    stateBuffer[idx] = 2.0; // Match clash_detection.wgsl: Disconnected/Danger state
+                }
+            }
+        }
 
         return results;
+        } catch (e) {
+            console.warn('ClashDetectionManager: analyzeInterferenceAsync failed', e);
+            return [];
+        } finally {
+            this._isAnalyzing = false;
+        }
     }
 }

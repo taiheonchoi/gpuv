@@ -23,6 +23,7 @@ struct CullingUniforms {
     viewProjection: mat4x4<f32>,
     frustumPlanes: array<vec4<f32>, 6>,
     cameraPosition: vec3<f32>,
+    _pad0: f32,                 // Explicit 4-byte padding after vec3 (WGSL alignment rules)
     hiZSize: vec2<f32>,
     lodThreshold: f32,
     totalInstances: u32,

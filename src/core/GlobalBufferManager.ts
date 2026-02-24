@@ -90,8 +90,9 @@ export class GlobalBufferManager {
      * Dynamically updates the instanceCount of an Indirect Draw buffer index.
      */
     public updateIndirectDrawCommand(commandIndex: number, instanceCountDelta: number): void {
+        if (commandIndex < 0 || commandIndex >= this._maxDrawCommands) return;
         const offset = commandIndex * 5;
-        this._indirectDrawData[offset + 1] += instanceCountDelta;
+        this._indirectDrawData[offset + 1] = Math.max(0, this._indirectDrawData[offset + 1] + instanceCountDelta);
         this.indirectDrawBuffer.update(this._indirectDrawData);
     }
 

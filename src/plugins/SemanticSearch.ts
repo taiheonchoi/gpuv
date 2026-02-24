@@ -76,9 +76,8 @@ export class SemanticSearch {
 
         console.log(`Semantic Search ['${attribute}' ${operator} ${value}] yielded ${results.length} matches.`);
 
-        // Dispatch updated states to VRAM immediately
-        // Note: Actual VRAM byte copying requires hooking the GlobalBufferManger natively like:
-        // device.queue.writeBuffer(sensorStatusGPUBuffer.getBuffer(), 0, floatStateBuffer.buffer);
+        // Flush updated health states to GPU so ghost_effect.wgsl reflects highlights immediately
+        this._sensorManager.syncStateBufferToGPU();
 
         return results;
     }

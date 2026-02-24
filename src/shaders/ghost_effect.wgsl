@@ -18,7 +18,14 @@ struct InstanceTRS {
 }
 
 @group(0) @binding(1) var<storage, read> instanceBuffers: array<InstanceTRS>;
-@group(0) @binding(2) var<storage, read> batchIdBuffers: array<u32>;
+// 16-byte aligned: [BatchID, pad, pad, pad] per instance — matches GlobalBufferManager._batchIdData stride of 4 u32s
+struct BatchIdEntry {
+    id: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(2) var<storage, read> batchIdBuffers: array<BatchIdEntry>;
 
 // Sensor metadata. Example: 0.0 = Normal, 1.0 = Delayed, 2.0 = Disconnected, 3.0 = Selected/Highlighted
 @group(0) @binding(3) var<storage, read> sensorHealthBuffers: array<f32>;
@@ -42,7 +49,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
 
     let instance = instanceBuffers[input.instance_index];
-    let batchId = batchIdBuffers[input.instance_index];
+    let batchId = batchIdBuffers[input.instance_index].id;
     let healthState = sensorHealthBuffers[input.instance_index];
 
     let modelMatrix = mat4x4<f32>(

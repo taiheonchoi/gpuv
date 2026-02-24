@@ -56,7 +56,7 @@ class MortonUtils {
     }
 
     private static splitBy2(a: bigint): bigint {
-        let x = a & 0x1fffff1n;
+        let x = a & 0x1fffffn;
         x = (x | (x << 32n)) & 0x1f00000000ffffn;
         x = (x | (x << 16n)) & 0x1f0000ff0000ffn;
         x = (x | (x << 8n)) & 0x100f00f00f00f00fn;
@@ -141,7 +141,9 @@ export class TilerSDK {
         const instances = await this.loadFromSQLite(projectPath);
         
         // 2. 공간 정렬 (Morton Code 기반)
-        const sorted = instances.sort((a, b) => Number(a.mortonCode! - b.mortonCode!));
+        const sorted = instances.sort((a, b) =>
+            a.mortonCode! < b.mortonCode! ? -1 : a.mortonCode! > b.mortonCode! ? 1 : 0
+        );
 
         // 3. 바이너리 파일 출력
         if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });

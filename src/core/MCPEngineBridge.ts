@@ -80,8 +80,9 @@ export class MCPEngineBridge {
                 // AppearanceManager 호출
                 switch (args.filterType) {
                     case "GHOST": return this.engineInstance.managers.appearance.setGhostMode(args.batchIds);
+                    case "XRAY": return this.engineInstance.managers.appearance.setGhostMode(args.batchIds); // X-ray maps to ghost (alpha 0.5)
                     case "HIGHLIGHT": return this.engineInstance.managers.appearance.setHighlight(args.batchIds);
-                    case "RESET": return this.engineInstance.managers.appearance.resetAll();
+                    case "RESET": return this.engineInstance.managers.appearance.clearAppearance(args.batchIds);
                 }
                 break;
 

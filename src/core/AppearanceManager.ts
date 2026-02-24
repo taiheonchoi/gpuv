@@ -19,14 +19,14 @@ export class AppearanceManager {
     public setHighlight(batchIds: number[]): void {
         const floatStateBuffer = this._sensorManager.getSensorStateBufferData();
 
-        // Reset old highlights manually leveraging high-speed Float array parsing
+        // Reset only highlight state (3.0) — preserve clash/danger (2.0) and delayed (1.0) states
         for (let i = 0; i < floatStateBuffer.length; i++) {
             if (floatStateBuffer[i] === 3.0) floatStateBuffer[i] = 0.0;
+            // States 1.0 (delayed) and 2.0 (danger/clash) are NOT cleared — they are safety-critical
         }
 
         for (const id of batchIds) {
-            // Out of bounds check
-            if (id < floatStateBuffer.length) {
+            if (id >= 0 && id < floatStateBuffer.length) {
                 floatStateBuffer[id] = 3.0; // Shader state index mapping for Highlight
             }
         }
@@ -43,7 +43,7 @@ export class AppearanceManager {
         const floatStateBuffer = this._sensorManager.getSensorStateBufferData();
 
         for (const id of batchIds) {
-            if (id < floatStateBuffer.length) {
+            if (id >= 0 && id < floatStateBuffer.length) {
                 floatStateBuffer[id] = 2.0; // Shader state index mapping for Digital Ghost
             }
         }
@@ -59,7 +59,7 @@ export class AppearanceManager {
         const floatStateBuffer = this._sensorManager.getSensorStateBufferData();
 
         for (const id of batchIds) {
-            if (id < floatStateBuffer.length) {
+            if (id >= 0 && id < floatStateBuffer.length) {
                 floatStateBuffer[id] = 0.0; // Base solid state
             }
         }

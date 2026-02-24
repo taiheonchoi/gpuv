@@ -20,10 +20,9 @@ fn generate_mip(@builtin(global_invocation_id) id: vec3<u32>) {
     let d2 = textureLoad(srcTexture, srcPos + vec2<i32>(0, 1), 0).r;
     let d3 = textureLoad(srcTexture, srcPos + vec2<i32>(1, 1), 0).r;
 
-    // Determine the minimum depth (furthest from camera in standard OpenGL, but closer in Reversed-Z)
-    // Assuming Babylon WebGPU runs 0.0 (near) to 1.0 (far), min depth represents the most conservative occluder depth
-    let minDepth = min(min(d0, d1), min(d2, d3));
+    // Babylon.js WebGPU uses reversed-Z: 1.0 = near, 0.0 = far.
+    // Conservative occlusion requires max depth per 2x2 block (nearest occluder in reversed-Z).
+    let maxDepth = max(max(d0, d1), max(d2, d3));
 
-    // Store the computed min-Z value into the current mip level
-    textureStore(dstTexture, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(minDepth, 0.0, 0.0, 0.0));
+    textureStore(dstTexture, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(maxDepth, 0.0, 0.0, 0.0));
 }

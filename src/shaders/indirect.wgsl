@@ -19,7 +19,14 @@ struct InstanceTRS {
 }
 
 @group(0) @binding(1) var<storage, read> instanceBuffers: array<InstanceTRS>;
-@group(0) @binding(2) var<storage, read> batchIdBuffers: array<u32>;
+// 16-byte aligned: [BatchID, pad, pad, pad] per instance — matches GlobalBufferManager._batchIdData stride of 4 u32s
+struct BatchIdEntry {
+    id: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(0) @binding(2) var<storage, read> batchIdBuffers: array<BatchIdEntry>;
 @group(0) @binding(3) var<storage, read> visibleInstanceIndices: array<u32>; // Added for Compute Culling output mapping
 
 struct VertexInput {
@@ -43,7 +50,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let global_index = visibleInstanceIndices[input.instance_index];
 
     let instance = instanceBuffers[global_index];
-    let batchId = batchIdBuffers[global_index];
+    let batchId = batchIdBuffers[global_index].id;
 
     // Reconstruct 4x4 matrix from standard std430 contiguous streams mapped in Phase 1
     let modelMatrix = mat4x4<f32>(

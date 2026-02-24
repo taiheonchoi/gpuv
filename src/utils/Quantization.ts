@@ -24,13 +24,18 @@ export class Quantization {
         const rangeY = max[1] - min[1];
         const rangeZ = max[2] - min[2];
 
-        const denominator = isUint16 ? 65535.0 : 32767.0;
-
         for (let i = 0; i < quantizedData.length; i += 3) {
-            // Apply quantization formula: (val / denominator) * range + min
-            floatData[i] = min[0] + (quantizedData[i] / denominator) * rangeX;
-            floatData[i + 1] = min[1] + (quantizedData[i + 1] / denominator) * rangeY;
-            floatData[i + 2] = min[2] + (quantizedData[i + 2] / denominator) * rangeZ;
+            if (isUint16) {
+                // Uint16 [0, 65535] → [0.0, 1.0]
+                floatData[i] = min[0] + (quantizedData[i] / 65535.0) * rangeX;
+                floatData[i + 1] = min[1] + (quantizedData[i + 1] / 65535.0) * rangeY;
+                floatData[i + 2] = min[2] + (quantizedData[i + 2] / 65535.0) * rangeZ;
+            } else {
+                // Int16 [-32768, 32767] → [0.0, 1.0] by offsetting to unsigned range
+                floatData[i] = min[0] + ((quantizedData[i] + 32768) / 65535.0) * rangeX;
+                floatData[i + 1] = min[1] + ((quantizedData[i + 1] + 32768) / 65535.0) * rangeY;
+                floatData[i + 2] = min[2] + ((quantizedData[i + 2] + 32768) / 65535.0) * rangeZ;
+            }
         }
 
         return floatData;
