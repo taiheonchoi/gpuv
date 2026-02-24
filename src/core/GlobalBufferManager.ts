@@ -1,0 +1,103 @@
+import { WebGPUEngine, StorageBuffer, Constants } from '@babylonjs/core';
+
+/**
+ * Singleton class to manage large-scale WebGPU Storage Buffers.
+ * Prepares the framework for Custom Spec 2.0 Indirect Batcher & Instance Streaming.
+ */
+export class GlobalBufferManager {
+    private static _instance: GlobalBufferManager | null = null;
+    private _engine: WebGPUEngine;
+
+    public instanceTRSBuffer!: StorageBuffer;
+    public batchIdBuffer!: StorageBuffer;
+    public indirectDrawBuffer!: StorageBuffer;
+
+    private _trsData: Float32Array;
+    private _batchIdData: Uint32Array;
+    private _indirectDrawData: Uint32Array;
+
+    private _instanceCount: number = 0;
+    private _maxDrawCommands: number = 1000;
+
+    // Allocated large memory up-front for up to 8M+ instances to avoid continuous reallocation
+    // Initial size is set lower (1M) for browser safety during testing, can be scaled to 8M+.
+    private readonly INITIAL_INSTANCE_CAPACITY = 1000000;
+
+    private constructor(engine: WebGPUEngine) {
+        this._engine = engine;
+
+        // 16 floats per instance (4x4 Matrix) to ensure std430 16-byte alignment rules
+        this._trsData = new Float32Array(this.INITIAL_INSTANCE_CAPACITY * 16);
+        // 4 uints per instance to align to 16 bytes: [BatchID, Padding, Padding, Padding]
+        this._batchIdData = new Uint32Array(this.INITIAL_INSTANCE_CAPACITY * 4);
+        // 5 uints per indexed draw command for IndirectDraw
+        // [indexCount, instanceCount, firstIndex, baseVertex, firstInstance]
+        this._indirectDrawData = new Uint32Array(this._maxDrawCommands * 5);
+    }
+
+    public static getInstance(engine?: WebGPUEngine): GlobalBufferManager {
+        if (!GlobalBufferManager._instance) {
+            if (!engine) throw new Error("Engine required to initialize GlobalBufferManager");
+            GlobalBufferManager._instance = new GlobalBufferManager(engine);
+            GlobalBufferManager._instance._initializeBuffers();
+        }
+        return GlobalBufferManager._instance;
+    }
+
+    private _initializeBuffers(): void {
+        // Babylon.js Constants.BUFFER_CREATIONFLAG_READWRITE implements: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST internally
+        const flags = Constants.BUFFER_CREATIONFLAG_READWRITE;
+
+        this.instanceTRSBuffer = new StorageBuffer(this._engine, this._trsData.byteLength, flags);
+        this.batchIdBuffer = new StorageBuffer(this._engine, this._batchIdData.byteLength, flags);
+        this.indirectDrawBuffer = new StorageBuffer(this._engine, this._indirectDrawData.byteLength, flags);
+
+        console.log(`Global Storage Buffers Allocated. Initial Capacity: ${this.INITIAL_INSTANCE_CAPACITY} instances.`);
+    }
+
+    /**
+     * Appends parsed instance TRS and BatchIDs into the global typed arrays and streams to GPU.
+     */
+    public appendInstanceData(trsData: Float32Array, batchIds: Uint32Array): void {
+        const count = batchIds.length;
+        if (this._instanceCount + count > this.INITIAL_INSTANCE_CAPACITY) {
+            console.error("Critical: Instance capacity exceeded!");
+            return;
+        }
+
+        // TRS Data is expected as 16-floats per instance (Matrix4x4)
+        const trsOffset = this._instanceCount * 16;
+        this._trsData.set(trsData, trsOffset);
+
+        // Batch IDs are stored with 16-byte alignment to prevent GPU struct misalignment
+        for (let i = 0; i < count; i++) {
+            const batchOffset = (this._instanceCount + i) * 4;
+            this._batchIdData[batchOffset] = batchIds[i];
+            // batchIdData[batchOffset + 1]... could hold other meta-data later
+        }
+
+        this._instanceCount += count;
+
+        // Dispatch updates using COPY_DST underneath
+        this.instanceTRSBuffer.update(this._trsData);
+        this.batchIdBuffer.update(this._batchIdData); // Babylon handles mapping TypedArray -> ArrayBuffer view
+    }
+
+    /**
+     * Dynamically updates the instanceCount of an Indirect Draw buffer index.
+     */
+    public updateIndirectDrawCommand(commandIndex: number, instanceCountDelta: number): void {
+        const offset = commandIndex * 5;
+        this._indirectDrawData[offset + 1] += instanceCountDelta;
+        this.indirectDrawBuffer.update(this._indirectDrawData);
+    }
+
+    // Maintained for backward compatibility with Phase 0 Setup skeleton
+    public initializeDummyBuffer(): void {
+        // Now handled by internal initialization
+    }
+
+    public get instanceCount(): number {
+        return this._instanceCount;
+    }
+}

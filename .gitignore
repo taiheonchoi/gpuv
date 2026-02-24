@@ -1,0 +1,14 @@
+node_modules/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# TypeScript/build debug output
+*.tsbuildinfo
+tsc_output*.txt
+error*.txt
