@@ -127,21 +127,32 @@ export class CustomTileParser {
         const buffer = binaryBuffers[bufferView.buffer];
 
         const byteOffset = (bufferView.byteOffset || 0) + (accessor.byteOffset || 0);
+        const componentCount = accessor.count * this._getComponentCount(accessor.type);
         let typedArray: any;
 
+        // Use buffer.slice() to create an aligned copy — avoids RangeError when
+        // byteOffset is not a multiple of the element size (e.g., Float32 requires 4-byte alignment)
         switch (accessor.componentType) {
-            case 5126: // Float32
-                typedArray = new Float32Array(buffer, byteOffset, accessor.count * this._getComponentCount(accessor.type));
+            case 5126: { // Float32
+                const byteLen = componentCount * 4;
+                typedArray = new Float32Array(buffer.slice(byteOffset, byteOffset + byteLen));
                 break;
-            case 5123: // Uint16
-                typedArray = new Uint16Array(buffer, byteOffset, accessor.count * this._getComponentCount(accessor.type));
+            }
+            case 5123: { // Uint16
+                const byteLen = componentCount * 2;
+                typedArray = new Uint16Array(buffer.slice(byteOffset, byteOffset + byteLen));
                 break;
-            case 5122: // Int16
-                typedArray = new Int16Array(buffer, byteOffset, accessor.count * this._getComponentCount(accessor.type));
+            }
+            case 5122: { // Int16
+                const byteLen = componentCount * 2;
+                typedArray = new Int16Array(buffer.slice(byteOffset, byteOffset + byteLen));
                 break;
-            case 5125: // Uint32
-                typedArray = new Uint32Array(buffer, byteOffset, accessor.count * this._getComponentCount(accessor.type));
+            }
+            case 5125: { // Uint32
+                const byteLen = componentCount * 4;
+                typedArray = new Uint32Array(buffer.slice(byteOffset, byteOffset + byteLen));
                 break;
+            }
             default:
                 throw new Error(`CustomTileParser: Unsupported componentType > ${accessor.componentType}`);
         }

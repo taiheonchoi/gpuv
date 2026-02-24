@@ -34,11 +34,10 @@ export class NavigationCore {
             trsData[offset + 14]
         );
 
-        // Security hook for Clash Check blocking automated navigation into obstructed hazards
+        // Security hook: block automated navigation into obstructed hazards
         if (checkForClash) {
-            console.log(`NavigationCore: Trajectory locked. BatchID ${batchId} is flagged hazardous.`);
-            // In a fully developed logic pipeline, invoke `ClashDetectionManager` map async checking here
-            // return;
+            console.warn(`NavigationCore: Trajectory locked. BatchID ${batchId} is flagged hazardous.`);
+            return;
         }
 
         this._animateCameraToTarget(targetPos);

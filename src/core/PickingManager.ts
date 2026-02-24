@@ -9,11 +9,13 @@ export class PickingManager {
     private _device: GPUDevice;
 
     private _pickingTexture!: GPUTexture;
+    private _pickingTextureView!: GPUTextureView;
     private _readBuffer!: GPUBuffer;
 
     private _width: number;
     private _height: number;
     private _pickInProgress = false;
+    private _resizeObserver: ReturnType<typeof this._engine.onResizeObservable.add> | null = null;
 
     constructor(engine: WebGPUEngine) {
         this._engine = engine;
@@ -26,7 +28,7 @@ export class PickingManager {
         this._initializeTargets();
 
         // Auto-scale target buffers seamlessly during DOM resizes
-        this._engine.onResizeObservable.add(() => {
+        this._resizeObserver = this._engine.onResizeObservable.add(() => {
             this._width = this._engine.getRenderWidth();
             this._height = this._engine.getRenderHeight();
             this._initializeTargets();
@@ -56,11 +58,27 @@ export class PickingManager {
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
         });
 
+        // Cache the texture view — avoid creating a new GPUTextureView per frame
+        this._pickingTextureView = this._pickingTexture.createView();
+
         console.log(`PickingManager Targets Initialized: ${this._width}x${this._height} R32Uint.`);
     }
 
     public get pickingTextureView(): GPUTextureView {
-        return this._pickingTexture.createView();
+        return this._pickingTextureView;
+    }
+
+    public dispose(): void {
+        if (this._resizeObserver) {
+            this._engine.onResizeObservable.remove(this._resizeObserver);
+            this._resizeObserver = null;
+        }
+        if (this._pickingTexture) {
+            this._pickingTexture.destroy();
+        }
+        if (this._readBuffer) {
+            this._readBuffer.destroy();
+        }
     }
 
     /**

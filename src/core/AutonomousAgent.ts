@@ -105,6 +105,10 @@ export class AutonomousAgent {
         };
 
         this._logHistory.push(report);
+        // Cap log history to prevent unbounded memory growth in long-running sessions
+        if (this._logHistory.length > 100) {
+            this._logHistory.shift();
+        }
         this._isScanning = false;
     }
 

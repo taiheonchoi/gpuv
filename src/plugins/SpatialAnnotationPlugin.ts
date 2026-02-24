@@ -1,4 +1,4 @@
-import { Scene, MeshBuilder, StandardMaterial, Color3, Vector3 } from '@babylonjs/core';
+import { Scene, MeshBuilder, StandardMaterial, Color3, Vector3, Matrix } from '@babylonjs/core';
 
 export interface AnnotationData {
     id: string;
@@ -46,7 +46,7 @@ export class SpatialAnnotationPlugin {
 
             laser.material = mat;
             // Set pivot to base to scale out correctly
-            laser.setPivotMatrix(babylonjsCoreMatrixTranslation(0, -50, 0), false);
+            laser.setPivotMatrix(Matrix.Translation(0, -50, 0), false);
             this._laserMap.set(data.userId, laser);
         }
 
@@ -93,11 +93,4 @@ export class SpatialAnnotationPlugin {
         sound.setPosition(location);
         */
     }
-}
-
-// Temporary internal utility bridging Translation mapping without raw import bloat
-function babylonjsCoreMatrixTranslation(x: number, y: number, z: number): any {
-    if (x || y || z) { /* consumes var */ }
-    // Return mock matrix format compatible with setPivotMatrix locally
-    return null; // Implemented via true Babylon.Matrix natively.
 }
