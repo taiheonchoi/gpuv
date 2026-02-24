@@ -128,6 +128,7 @@ export class CCTVSystem {
         easingFunction.setEasingMode(EasingFunction.EASINGMODE_EASEINOUT);
 
         // Interpolate Position
+        // Loop mode 0 = CONSTANT: play once and hold final value (not 2=RELATIVE which drifts)
         Animation.CreateAndStartAnimation(
             "cameraPosMove",
             this._mainCamera,
@@ -135,13 +136,14 @@ export class CCTVSystem {
             60, 60,
             this._mainCamera.position,
             cctv.data.position,
-            2,
+            0,
             easingFunction
         );
 
         // Interpolate Target (Assumes a TargetCamera structure)
         if ((this._mainCamera as any).setTarget) {
             const currentTarget = (this._mainCamera as any).getTarget();
+            // Loop mode 0 = CONSTANT: play once and hold final value (not 2=RELATIVE which drifts)
             Animation.CreateAndStartAnimation(
                 "cameraTargetMove",
                 this._mainCamera,
@@ -149,7 +151,7 @@ export class CCTVSystem {
                 60, 60,
                 currentTarget,
                 cctv.data.target,
-                2,
+                0,
                 easingFunction
             );
         }
