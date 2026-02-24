@@ -102,6 +102,8 @@ export class AIContextManager {
                     if (breaches.length > 0) {
                         // Outline them in Ghost red to inform local inspectors organically
                         this._appearanceManager.setGhostMode(breaches);
+                        // Sync clash state so subsequent flushes preserve the 2.0 danger state
+                        this._appearanceManager.syncClashState(breaches);
                         return `DANGER: Detected ${breaches.length} interference collisions. Ghosted the faulty instances in red mapping view.`;
                     }
                     return `Status Normal: 0 structural collisions detected inside physical boundaries.`;

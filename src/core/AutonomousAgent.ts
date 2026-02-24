@@ -96,6 +96,8 @@ export class AutonomousAgent {
 
             // Force Red Emissive bounding visualization
             this._appearanceManager.setGhostMode(clashBreaches);
+            // Sync clash state so subsequent flushes preserve the 2.0 danger state
+            this._appearanceManager.syncClashState(clashBreaches);
 
             // Immediately fly the user camera to supervise the dangerous coordination
             this._navigationCore.moveTo(clashBreaches[0], false);

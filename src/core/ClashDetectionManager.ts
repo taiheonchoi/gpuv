@@ -26,6 +26,7 @@ export class ClashDetectionManager {
     private _clashIndicesReadBuffer!: GPUBuffer;
 
     private _dynamicList: DynamicObjectData[] = [];
+    private readonly MAX_DYNAMIC_OBJECTS = 64;
     private readonly MAX_CLASHES = 10000; // Limit readback size to avoid CPU stalling
 
     // Pre-allocated zero buffer for clearing atomic counters (avoids per-frame GPU buffer creation)
@@ -81,6 +82,10 @@ export class ClashDetectionManager {
         if (idx !== -1) {
             this._dynamicList[idx] = obj;
         } else {
+            if (this._dynamicList.length >= this.MAX_DYNAMIC_OBJECTS) {
+                console.warn(`ClashDetectionManager: Max dynamic objects (${this.MAX_DYNAMIC_OBJECTS}) reached. Ignoring '${obj.id}'.`);
+                return;
+            }
             this._dynamicList.push(obj);
         }
 
