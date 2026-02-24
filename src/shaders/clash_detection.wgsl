@@ -18,8 +18,8 @@ struct DynamicObject {
 struct ClashUniforms {
     totalInstances: u32,
     dynamicObjectCount: u32,
+    maxClashResults: u32,
     pad1: u32,
-    pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read> boundingVolumes: array<BoundingVolume>;
@@ -57,7 +57,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         sensorHealthBuffers[index] = 2.0;
 
         // Atomically append the exact BatchID to the read-back registry for the AI/MCP System
+        // Bounds-check prevents overflow when clash count exceeds buffer capacity
         let clashIdx = atomicAdd(&clashResultCount, 1u);
-        clashResultIndices[clashIdx] = index;
+        if (clashIdx < uniforms.maxClashResults) {
+            clashResultIndices[clashIdx] = index;
+        }
     }
 }

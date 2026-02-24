@@ -106,6 +106,8 @@ export class IndirectRenderPlugin {
     public dispose(): void {
         if (this._renderObserver) {
             this._scene.onBeforeRenderObservable.remove(this._renderObserver);
+            this._renderObserver = null;
         }
+        this._pickingManager.dispose();
     }
 }

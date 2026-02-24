@@ -27,8 +27,11 @@ struct BatchIdEntry {
 }
 @group(0) @binding(2) var<storage, read> batchIdBuffers: array<BatchIdEntry>;
 
+// Culling indirection buffer: maps draw instance_index → global instance index
+@group(0) @binding(3) var<storage, read> visibleInstanceIndices: array<u32>;
+
 // Sensor metadata. Example: 0.0 = Normal, 1.0 = Delayed, 2.0 = Disconnected, 3.0 = Selected/Highlighted
-@group(0) @binding(3) var<storage, read> sensorHealthBuffers: array<f32>;
+@group(0) @binding(4) var<storage, read> sensorHealthBuffers: array<f32>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -48,9 +51,12 @@ struct VertexOutput {
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
 
-    let instance = instanceBuffers[input.instance_index];
-    let batchId = batchIdBuffers[input.instance_index].id;
-    let healthState = sensorHealthBuffers[input.instance_index];
+    // Fetch real global index from the indirection buffer populated by the Culling Compute Shader
+    let global_index = visibleInstanceIndices[input.instance_index];
+
+    let instance = instanceBuffers[global_index];
+    let batchId = batchIdBuffers[global_index].id;
+    let healthState = sensorHealthBuffers[global_index];
 
     let modelMatrix = mat4x4<f32>(
         instance.modelMatrix0,

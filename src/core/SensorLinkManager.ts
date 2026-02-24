@@ -35,7 +35,20 @@ export class SensorLinkManager {
 
         for (const data of payload) {
             const batchId = data.batchId;
+
+            // Bounds validation: skip invalid batchIds to prevent out-of-range buffer access
+            if (batchId < 0 || batchId >= this.MAX_INSTANCES) {
+                console.warn(`SensorLinkManager: batchId ${batchId} out of range [0, ${this.MAX_INSTANCES}). Skipping.`);
+                continue;
+            }
+
             const offset = batchId * 16; // 4x4 Matrix offset per instance
+
+            // Verify offset doesn't exceed trsData bounds
+            if (offset + 16 > trsData.length) {
+                console.warn(`SensorLinkManager: batchId ${batchId} exceeds TRS buffer bounds. Skipping.`);
+                continue;
+            }
 
             // Decompose existing matrix to preserve untouched components
             const existingMatrix = Matrix.FromArray(trsData, offset);

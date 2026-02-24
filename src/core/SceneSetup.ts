@@ -7,6 +7,7 @@ export class SceneSetup {
     private _gui: dat.GUI;
     // GPU timestamp variables
     private _gpuFrameTimeMs: number = 0;
+    private _perfIntervalId: ReturnType<typeof setInterval> | null = null;
 
     constructor(scene: Scene, engine: WebGPUEngine) {
         this._scene = scene;
@@ -41,7 +42,7 @@ export class SceneSetup {
         perfFolder.add(monitorParams, 'gpuFrameTime').name('GPU Frame Time').listen();
         perfFolder.open();
 
-        setInterval(() => {
+        this._perfIntervalId = setInterval(() => {
             monitorParams.fps = this._engine.getFps().toFixed(2);
             monitorParams.gpuFrameTime = this._gpuFrameTimeMs.toFixed(2) + " ms";
         }, 500);
@@ -57,5 +58,13 @@ export class SceneSetup {
         // and using timestamp write queues.
         // This calculates an estimated frame time as a fallback for the timestamp query system.
         this._gpuFrameTimeMs = 1000 / (this._engine.getFps() + 0.001);
+    }
+
+    public dispose(): void {
+        if (this._perfIntervalId !== null) {
+            clearInterval(this._perfIntervalId);
+            this._perfIntervalId = null;
+        }
+        this._gui.destroy();
     }
 }

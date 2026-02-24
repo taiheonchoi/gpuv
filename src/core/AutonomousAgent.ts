@@ -25,6 +25,7 @@ export class AutonomousAgent {
     private _isScanning: boolean = false;
     private _idleTimer: any = null;
     private _logHistory: ScanReport[] = [];
+    private _disposed: boolean = false;
 
     // Trigger proactive scans after 10 seconds of user inactivity
     private readonly IDLE_THRESHOLD_MS = 10000;
@@ -51,11 +52,12 @@ export class AutonomousAgent {
      * Resets the idle timer when user interacts with the canvas or UI.
      */
     public pingUserActivity(): void {
+        if (this._disposed) return;
         if (this._idleTimer) clearTimeout(this._idleTimer);
         this._isScanning = false;
 
         this._idleTimer = setTimeout(() => {
-            if (!this._isScanning) {
+            if (!this._isScanning && !this._disposed) {
                 this.executeDiagnosticSweep();
             }
         }, this.IDLE_THRESHOLD_MS);
@@ -66,11 +68,18 @@ export class AutonomousAgent {
      * Generates an actionable MCP context report and acts proactively on critical threats.
      */
     public async executeDiagnosticSweep(): Promise<void> {
+        if (this._disposed) return;
         this._isScanning = true;
         console.log("AutonomousAgent: Initiating deep diagnostic sweep across 8M structure...");
 
         // 1. Evaluate Math Clash Registry natively pulled from GPU Memory
         const clashBreaches = await this._clashManager.analyzeInterferenceAsync();
+
+        // Check cancellation after async operation
+        if (this._disposed) {
+            this._isScanning = false;
+            return;
+        }
 
         // 2. Evaluate Telemetry Disconnects (Health state > 1.5 corresponds to Disconnected)
         const faultyNodes: number[] = [];
@@ -114,5 +123,17 @@ export class AutonomousAgent {
 
     public getDiagnosticHistory(): ScanReport[] {
         return this._logHistory;
+    }
+
+    /**
+     * Stops all pending/active sweeps and clears the idle timer.
+     */
+    public dispose(): void {
+        this._disposed = true;
+        this._isScanning = false;
+        if (this._idleTimer) {
+            clearTimeout(this._idleTimer);
+            this._idleTimer = null;
+        }
     }
 }

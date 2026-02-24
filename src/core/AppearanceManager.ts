@@ -7,6 +7,9 @@ import { SensorLinkManager } from './SensorLinkManager';
 export class AppearanceManager {
     private _sensorManager: SensorLinkManager;
 
+    // Track which batchIds were highlighted by this manager to avoid erasing SemanticSearch highlights
+    private _highlightedIds: Set<number> = new Set();
+
     constructor(sensorManager: SensorLinkManager) {
         this._sensorManager = sensorManager;
     }
@@ -19,15 +22,18 @@ export class AppearanceManager {
     public setHighlight(batchIds: number[]): void {
         const floatStateBuffer = this._sensorManager.getSensorStateBufferData();
 
-        // Reset only highlight state (3.0) — preserve clash/danger (2.0) and delayed (1.0) states
-        for (let i = 0; i < floatStateBuffer.length; i++) {
-            if (floatStateBuffer[i] === 3.0) floatStateBuffer[i] = 0.0;
-            // States 1.0 (delayed) and 2.0 (danger/clash) are NOT cleared — they are safety-critical
+        // Clear only previously highlighted IDs owned by this manager
+        for (const id of this._highlightedIds) {
+            if (id >= 0 && id < floatStateBuffer.length && floatStateBuffer[id] === 3.0) {
+                floatStateBuffer[id] = 0.0;
+            }
         }
+        this._highlightedIds.clear();
 
         for (const id of batchIds) {
             if (id >= 0 && id < floatStateBuffer.length) {
                 floatStateBuffer[id] = 3.0; // Shader state index mapping for Highlight
+                this._highlightedIds.add(id);
             }
         }
 

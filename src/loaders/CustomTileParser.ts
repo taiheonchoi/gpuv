@@ -105,15 +105,10 @@ export class CustomTileParser {
         // Increments rendering scale by the number of parsed tiles
         this._bufferManager.updateIndirectDrawCommand(0, count);
 
-        // Memory Management: Clear references immediately so large Float32/Uint16 structures GC smoothly.
-        // In JavaScript, TypedArrays can hold onto underlying ArrayBuffers. 
-        // Although block scope helps, explicit nulling aids faster garbage collection for huge tilesets.
-        (packedTRS as any) = null;
-        (finalTranslations as any) = null;
-        (batchIds as any) = null;
-
-        // Remove parsed extensions from memory so JSON objects don't linger
-        delete instancingExt.attributes;
+        // Note: local TypedArray references (packedTRS, finalTranslations, batchIds) are
+        // automatically eligible for GC when this function scope exits.
+        // Do NOT delete instancingExt.attributes — it destroys tile re-parsing capability
+        // which is needed for tile unload/reload cycles in streaming scenarios.
     }
 
     /**

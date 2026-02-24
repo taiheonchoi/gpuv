@@ -14,9 +14,12 @@ export interface EntityMetadata {
 export class SemanticSearch {
     private _sensorManager: SensorLinkManager;
 
-    // Simulated Metadata Database 
+    // Simulated Metadata Database
     // In production, this would be an IndexedDB or compressed JSON lookup loaded from 3D Tiles Batch Table
     private _database: Map<number, EntityMetadata>;
+
+    // Track which batchIds were highlighted by search to avoid erasing AppearanceManager highlights
+    private _searchHighlightedIds: Set<number> = new Set();
 
     constructor(sensorManager: SensorLinkManager) {
         this._sensorManager = sensorManager;
@@ -37,15 +40,14 @@ export class SemanticSearch {
     public queryAttributeSearch(attribute: keyof EntityMetadata, operator: string, value: any): number[] {
         const results: number[] = [];
 
-        // Reset global highlighted states using the IoT Sensor Metadata buffer (Status 3.0 = Highlight)
-        // This is O(N) but accessing raw Float32Array is extremely fast. 
+        // Clear only previously search-highlighted IDs owned by this SemanticSearch instance
         const floatStateBuffer = this._sensorManager.getSensorStateBufferData();
-        for (let i = 0; i < floatStateBuffer.length; i++) {
-            // Restore highlighted pins back to 'Normal' (0) if they were previously searched
-            if (floatStateBuffer[i] === 3.0) {
-                floatStateBuffer[i] = 0.0;
+        for (const id of this._searchHighlightedIds) {
+            if (id >= 0 && id < floatStateBuffer.length && floatStateBuffer[id] === 3.0) {
+                floatStateBuffer[id] = 0.0;
             }
         }
+        this._searchHighlightedIds.clear();
 
         // Evaluate Search Query mapped directly
         this._database.forEach((meta) => {
@@ -70,7 +72,10 @@ export class SemanticSearch {
             if (isMatch) {
                 results.push(meta.batchId);
                 // Flag WebGPU metadata buffer index for highlighting
-                floatStateBuffer[meta.batchId] = 3.0; // Shader maps 3.0 to Blue Glowing
+                if (meta.batchId >= 0 && meta.batchId < floatStateBuffer.length) {
+                    floatStateBuffer[meta.batchId] = 3.0; // Shader maps 3.0 to Blue Glowing
+                    this._searchHighlightedIds.add(meta.batchId);
+                }
             }
         });
 

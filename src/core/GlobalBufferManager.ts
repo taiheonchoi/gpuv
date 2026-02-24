@@ -101,6 +101,25 @@ export class GlobalBufferManager {
         // Now handled by internal initialization
     }
 
+    /**
+     * Releases all GPU StorageBuffers and resets the singleton.
+     * Must be called before engine re-initialization to prevent stale buffer references.
+     */
+    public dispose(): void {
+        this.instanceTRSBuffer?.dispose();
+        this.batchIdBuffer?.dispose();
+        this.indirectDrawBuffer?.dispose();
+        this.sensorStateBuffer?.dispose();
+
+        this._trsData = new Float32Array(0);
+        this._batchIdData = new Uint32Array(0);
+        this._indirectDrawData = new Uint32Array(0);
+        this._instanceCount = 0;
+
+        GlobalBufferManager._instance = null;
+        console.log("GlobalBufferManager: Disposed and singleton reset.");
+    }
+
     public get instanceCount(): number {
         return this._instanceCount;
     }
