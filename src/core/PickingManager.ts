@@ -15,6 +15,7 @@ export class PickingManager {
     private _width: number;
     private _height: number;
     private _pickInProgress = false;
+    private _pendingResize = false;
     private _resizeObserver: ReturnType<typeof this._engine.onResizeObservable.add> | null = null;
 
     constructor(engine: WebGPUEngine) {
@@ -31,7 +32,12 @@ export class PickingManager {
         this._resizeObserver = this._engine.onResizeObservable.add(() => {
             this._width = this._engine.getRenderWidth();
             this._height = this._engine.getRenderHeight();
-            this._initializeTargets();
+            // Defer resize if a pick operation is in progress to avoid destroying the read buffer
+            if (this._pickInProgress) {
+                this._pendingResize = true;
+            } else {
+                this._initializeTargets();
+            }
         });
     }
 
@@ -128,6 +134,11 @@ export class PickingManager {
             return 0;
         } finally {
             this._pickInProgress = false;
+            // Apply deferred resize now that the pick operation is complete
+            if (this._pendingResize) {
+                this._pendingResize = false;
+                this._initializeTargets();
+            }
         }
     }
 }

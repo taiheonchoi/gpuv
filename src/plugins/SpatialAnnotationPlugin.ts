@@ -60,6 +60,13 @@ export class SpatialAnnotationPlugin {
      * Maps physical post-it notes floating above structural defects.
      */
     public createSpatialAnnotation(data: AnnotationData): void {
+        // Dispose existing annotation if re-adding with same ID to prevent mesh/material leak
+        const existing = this._annotationList.get(data.id);
+        if (existing) {
+            existing.mesh.material?.dispose();
+            existing.mesh.dispose();
+        }
+
         const pin = MeshBuilder.CreateSphere(`note_${data.id}`, { diameter: 0.5 }, this._scene);
         pin.position = data.position;
 

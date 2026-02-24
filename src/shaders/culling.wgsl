@@ -86,5 +86,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     // Execute zero-latency atomic writes to hardware indirect buffer
     let visibleIndex = atomicAdd(&indirectBuffer.instanceCount, 1u);
-    visibleInstanceIndices[visibleIndex] = index;
+    // Bounds-check prevents GPU OOB write if visible count exceeds buffer capacity
+    if (visibleIndex < arrayLength(&visibleInstanceIndices)) {
+        visibleInstanceIndices[visibleIndex] = index;
+    }
 }

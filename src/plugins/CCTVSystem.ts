@@ -1,4 +1,4 @@
-import { Scene, Camera, Vector3, MeshBuilder, StandardMaterial, Color3, Matrix, Quaternion, Animation, CubicEase, EasingFunction } from '@babylonjs/core';
+import { Scene, Camera, Vector3, MeshBuilder, StandardMaterial, Color3, Matrix, Quaternion, Animation, CubicEase, EasingFunction, Animatable } from '@babylonjs/core';
 
 export interface CCTVData {
     id: string;
@@ -15,6 +15,9 @@ export class CCTVSystem {
     private _scene: Scene;
     private _mainCamera: Camera;
     private _cctvMap: Map<string, { model: any; frustum: any; data: CCTVData }>;
+    // Track running animations to stop them before starting new ones (prevents stacking)
+    private _modelAnims: Map<string, Animatable> = new Map();
+    private _coneAnims: Map<string, Animatable> = new Map();
 
     constructor(scene: Scene, mainCamera: Camera) {
         this._scene = scene;
@@ -26,6 +29,17 @@ export class CCTVSystem {
      * Initializes a CCTV camera entity with its Frustum visualizer.
      */
     public addCCTV(data: CCTVData): void {
+        // Dispose existing CCTV entry if re-adding with same ID to prevent mesh/material leak
+        const existing = this._cctvMap.get(data.id);
+        if (existing) {
+            existing.model.material?.dispose();
+            existing.model.dispose();
+            existing.frustum.material?.dispose();
+            existing.frustum.dispose();
+            this._modelAnims.get(data.id)?.stop();
+            this._coneAnims.get(data.id)?.stop();
+        }
+
         // Physical CCTV Body Stub
         const cameraBox = MeshBuilder.CreateBox(`cctv_body_${data.id}`, { width: 0.5, height: 0.5, depth: 1 }, this._scene);
         cameraBox.position = data.position;
@@ -83,8 +97,16 @@ export class CCTVSystem {
 
         // Slerp for smooth transition (avoiding immediate snaps from live data)
         if (cctv.model.rotationQuaternion) {
-            Animation.CreateAndStartAnimation("cctv_ptz_anim", cctv.model, "rotationQuaternion", 60, 30, cctv.model.rotationQuaternion, rotation, 2);
-            Animation.CreateAndStartAnimation("cctv_cone_anim", cctv.frustum, "rotationQuaternion", 60, 30, cctv.frustum.rotationQuaternion, rotation.multiply(offsetRot), 2);
+            // Stop any running animations to prevent stacking (memory leak + visual jitter)
+            this._modelAnims.get(id)?.stop();
+            this._coneAnims.get(id)?.stop();
+
+            // Loop mode 0 = CONSTANT: play once and hold final value (not 2=RELATIVE which spirals)
+            const modelAnim = Animation.CreateAndStartAnimation("cctv_ptz_anim", cctv.model, "rotationQuaternion", 60, 30, cctv.model.rotationQuaternion, rotation, 0);
+            const coneAnim = Animation.CreateAndStartAnimation("cctv_cone_anim", cctv.frustum, "rotationQuaternion", 60, 30, cctv.frustum.rotationQuaternion, rotation.multiply(offsetRot), 0);
+
+            if (modelAnim) this._modelAnims.set(id, modelAnim);
+            if (coneAnim) this._coneAnims.set(id, coneAnim);
         }
 
         if (newFov) {

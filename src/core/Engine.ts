@@ -8,6 +8,7 @@ export class EngineSetup {
     private _scene!: Scene;
     private _sceneSetup!: SceneSetup;
     private _bufferManager!: GlobalBufferManager;
+    private _resizeHandler: (() => void) | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
         this._canvas = canvas;
@@ -45,9 +46,8 @@ export class EngineSetup {
             this._sceneSetup.endFrame();
         });
 
-        window.addEventListener('resize', () => {
-            this._engine.resize();
-        });
+        this._resizeHandler = () => { this._engine.resize(); };
+        window.addEventListener('resize', this._resizeHandler);
 
         console.log("Custom Spec 2.0 WebGPU Engine Initialized.");
     }
@@ -58,5 +58,17 @@ export class EngineSetup {
 
     public get scene(): Scene {
         return this._scene;
+    }
+
+    public dispose(): void {
+        if (this._resizeHandler) {
+            window.removeEventListener('resize', this._resizeHandler);
+            this._resizeHandler = null;
+        }
+        this._engine.stopRenderLoop();
+        this._sceneSetup.dispose();
+        this._bufferManager.dispose();
+        this._scene.dispose();
+        this._engine.dispose();
     }
 }

@@ -4,7 +4,7 @@
 @group(0) @binding(0) var srcTexture: texture_2d<f32>;
 @group(0) @binding(1) var dstTexture: texture_storage_2d<r32float, write>;
 
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(8, 8, 1)
 fn generate_mip(@builtin(global_invocation_id) id: vec3<u32>) {
     let dstSize = textureDimensions(dstTexture);
     if (id.x >= dstSize.x || id.y >= dstSize.y) {
@@ -21,8 +21,10 @@ fn generate_mip(@builtin(global_invocation_id) id: vec3<u32>) {
     let d3 = textureLoad(srcTexture, srcPos + vec2<i32>(1, 1), 0).r;
 
     // Babylon.js WebGPU uses reversed-Z: 1.0 = near, 0.0 = far.
-    // Conservative occlusion requires max depth per 2x2 block (nearest occluder in reversed-Z).
-    let maxDepth = max(max(d0, d1), max(d2, d3));
+    // Conservative occlusion requires min depth per 2x2 block (farthest occluder in reversed-Z).
+    // Using min ensures objects behind any occluder in the block are correctly culled,
+    // while objects in front of the farthest occluder are conservatively kept visible.
+    let minDepth = min(min(d0, d1), min(d2, d3));
 
-    textureStore(dstTexture, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(maxDepth, 0.0, 0.0, 0.0));
+    textureStore(dstTexture, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(minDepth, 0.0, 0.0, 0.0));
 }

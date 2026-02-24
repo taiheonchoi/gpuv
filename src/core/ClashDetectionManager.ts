@@ -179,4 +179,17 @@ export class ClashDetectionManager {
             this._isAnalyzing = false;
         }
     }
+
+    /**
+     * Releases all GPU resources (StorageBuffers and raw GPUBuffers).
+     * Must be called before engine teardown to prevent GPU memory leaks.
+     */
+    public dispose(): void {
+        this._zeroBuffer?.destroy();
+        this._clashCountReadBuffer?.destroy();
+        this._clashIndicesReadBuffer?.destroy();
+        this.dynamicObjectsBuffer?.dispose();
+        this.clashCountBuffer?.dispose();
+        this.clashIndicesBuffer?.dispose();
+    }
 }

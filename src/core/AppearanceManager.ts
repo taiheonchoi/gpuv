@@ -9,6 +9,8 @@ export class AppearanceManager {
 
     // Track which batchIds were highlighted by this manager to avoid erasing SemanticSearch highlights
     private _highlightedIds: Set<number> = new Set();
+    // Track which batchIds are in clash state (2.0) written by GPU shader, to preserve on flush
+    private _clashIds: Set<number> = new Set();
 
     constructor(sensorManager: SensorLinkManager) {
         this._sensorManager = sensorManager;
@@ -74,10 +76,36 @@ export class AppearanceManager {
     }
 
     /**
+     * Marks specific batchIds as in clash state (2.0) on the CPU side.
+     * Called after clash detection readback to keep CPU and GPU in sync.
+     */
+    public syncClashState(clashIds: number[]): void {
+        this._clashIds.clear();
+        const floatStateBuffer = this._sensorManager.getSensorStateBufferData();
+        for (const id of clashIds) {
+            if (id >= 0 && id < floatStateBuffer.length) {
+                this._clashIds.add(id);
+                // Ensure CPU buffer reflects the GPU-written clash state
+                if (floatStateBuffer[id] !== 3.0) {
+                    floatStateBuffer[id] = 2.0;
+                }
+            }
+        }
+    }
+
+    /**
      * Triggers the GPU StorageBuffer upload through SensorLinkManager,
      * ensuring WGSL shaders immediately reflect appearance state changes.
+     * Preserves clash states (2.0) that were written by GPU shaders.
      */
     private _flushToGPU(): void {
+        // Re-apply clash states before uploading to prevent CPU flush from overwriting GPU-written 2.0 values
+        const floatStateBuffer = this._sensorManager.getSensorStateBufferData();
+        for (const id of this._clashIds) {
+            if (id >= 0 && id < floatStateBuffer.length && floatStateBuffer[id] === 0.0) {
+                floatStateBuffer[id] = 2.0;
+            }
+        }
         this._sensorManager.syncStateBufferToGPU();
     }
 }

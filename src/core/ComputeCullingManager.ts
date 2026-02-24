@@ -102,4 +102,14 @@ export class ComputeCullingManager {
         }
         commandEncoder.popDebugGroup();
     }
+
+    /**
+     * Releases all GPU resources (StorageBuffers and raw GPUBuffers).
+     * Must be called before engine teardown to prevent GPU memory leaks.
+     */
+    public dispose(): void {
+        this._zeroBuffer?.destroy();
+        this.visibleInstanceIndexBuffer?.dispose();
+        this.boundingVolumeBuffer?.dispose();
+    }
 }
