@@ -66,15 +66,23 @@ export class SensorLinkManager {
         }
 
         // Notify WebGPU Device Queue to COPY_DST these memory segments
-        // We write the complete buffer to VRAM. For highly optimized 8M+ updates, you would only update 
+        // We write the complete buffer to VRAM. For highly optimized 8M+ updates, you would only update
         // byte-specific sub-ranges utilizing `device.queue.writeBuffer` with specific byte sizes.
         this._bufferManager.instanceTRSBuffer.update(trsData);
 
-        // Similarly, update a secondary Metadata Buffer if injected into the WGSL...
-        // e.g. this._sensorStateGPUBuffer.update(this._sensorStateBuffer);
+        // Sync health/appearance state to GPU so ghost_effect.wgsl reflects telemetry changes
+        this.syncStateBufferToGPU();
     }
 
     public getSensorStateBufferData(): Float32Array {
         return this._sensorStateBuffer;
+    }
+
+    /**
+     * Uploads the CPU-side sensor state Float32Array to the GPU StorageBuffer
+     * so that WGSL shaders (ghost_effect, clash_detection) can read updated states.
+     */
+    public syncStateBufferToGPU(): void {
+        this._bufferManager.sensorStateBuffer.update(this._sensorStateBuffer);
     }
 }

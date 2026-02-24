@@ -26,6 +26,9 @@ export class ClashDetectionManager {
     private _dynamicList: DynamicObjectData[] = [];
     private readonly MAX_CLASHES = 10000; // Limit readback size to avoid CPU stalling
 
+    // Pre-allocated zero buffer for clearing atomic counters (avoids per-frame GPU buffer creation)
+    private _zeroBuffer!: GPUBuffer;
+
     constructor(engine: WebGPUEngine, _cullingManager: ComputeCullingManager) {
         this._engine = engine;
         this._device = (this._engine as any)._device;
@@ -33,6 +36,10 @@ export class ClashDetectionManager {
         if (_cullingManager) { /* Conceptual Link Ready */ }
 
         this._initializeBuffers();
+        this._zeroBuffer = this._device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_SRC,
+        });
     }
 
     private _initializeBuffers(): void {
@@ -80,10 +87,9 @@ export class ClashDetectionManager {
     public executeClashDetection(commandEncoder: GPUCommandEncoder): void {
         commandEncoder.pushDebugGroup("Clash_Detection_Pass");
 
-        // 1. Clear atomic result count to 0 using a fast internal memory copy
-        const clearBuff = this._device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_SRC });
+        // 1. Clear atomic result count to 0 using pre-allocated zero buffer
         commandEncoder.copyBufferToBuffer(
-            clearBuff, 0,
+            this._zeroBuffer, 0,
             (this.clashResultBuffer.getBuffer() as any).underlyingResource as GPUBuffer, 0,
             4
         );

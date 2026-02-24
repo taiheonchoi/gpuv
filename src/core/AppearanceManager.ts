@@ -68,10 +68,10 @@ export class AppearanceManager {
     }
 
     /**
-     * Triggers the `device.queue.writeBuffer` command through the sensor hierarchy bridging updates to WebGPU.
+     * Triggers the GPU StorageBuffer upload through SensorLinkManager,
+     * ensuring WGSL shaders immediately reflect appearance state changes.
      */
     private _flushToGPU(): void {
-        // Concept mapping for Phase 4:
-        // this._sensorManager.syncStateBufferToGPU(); 
+        this._sensorManager.syncStateBufferToGPU();
     }
 }

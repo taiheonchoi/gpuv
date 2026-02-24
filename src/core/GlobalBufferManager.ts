@@ -11,6 +11,7 @@ export class GlobalBufferManager {
     public instanceTRSBuffer!: StorageBuffer;
     public batchIdBuffer!: StorageBuffer;
     public indirectDrawBuffer!: StorageBuffer;
+    public sensorStateBuffer!: StorageBuffer;
 
     private _trsData: Float32Array;
     private _batchIdData: Uint32Array;
@@ -51,6 +52,8 @@ export class GlobalBufferManager {
         this.instanceTRSBuffer = new StorageBuffer(this._engine, this._trsData.byteLength, flags);
         this.batchIdBuffer = new StorageBuffer(this._engine, this._batchIdData.byteLength, flags);
         this.indirectDrawBuffer = new StorageBuffer(this._engine, this._indirectDrawData.byteLength, flags);
+        // 1 float per instance: health/appearance state for ghost_effect.wgsl & clash_detection.wgsl
+        this.sensorStateBuffer = new StorageBuffer(this._engine, this.INITIAL_INSTANCE_CAPACITY * 4, flags);
 
         console.log(`Global Storage Buffers Allocated. Initial Capacity: ${this.INITIAL_INSTANCE_CAPACITY} instances.`);
     }

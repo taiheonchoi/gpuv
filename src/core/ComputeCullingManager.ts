@@ -16,6 +16,9 @@ export class ComputeCullingManager {
     public visibleInstanceIndexBuffer!: StorageBuffer;
     public boundingVolumeBuffer!: StorageBuffer;
 
+    // Pre-allocated zero buffer for clearing atomic counters (avoids per-frame GPU buffer creation)
+    private _zeroBuffer!: GPUBuffer;
+
     private readonly MAX_INSTANCES = 1000000;
 
     constructor(engine: WebGPUEngine) {
@@ -24,6 +27,14 @@ export class ComputeCullingManager {
         this._bufferManager = GlobalBufferManager.getInstance();
 
         this._initializeCullingBuffers();
+        this._initializeZeroBuffer();
+    }
+
+    private _initializeZeroBuffer(): void {
+        this._zeroBuffer = this._device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_SRC,
+        });
     }
 
     private _initializeCullingBuffers(): void {
@@ -55,15 +66,14 @@ export class ComputeCullingManager {
         commandEncoder.pushDebugGroup("Reset_Indirect_Atomic_Counters");
 
         // The indirect draw indexed buffer format structure:
-        // [0] indexCount 
+        // [0] indexCount
         // [1] instanceCount  <-- Needs to be cleared to 0u
         // [2] firstIndex
         // [3] baseVertex
         // [4] firstInstance
-        const clearBuff = this._device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_SRC });
-
+        // Reuse pre-allocated zero buffer (default-initialized to 0) to avoid per-frame GPU buffer leak
         commandEncoder.copyBufferToBuffer(
-            clearBuff, 0,
+            this._zeroBuffer, 0,
             indirectBuff.underlyingResource as GPUBuffer, 4, // Byte offset 4 targets instanceCount
             4
         );

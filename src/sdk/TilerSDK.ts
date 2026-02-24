@@ -113,8 +113,8 @@ class BinaryCompiler {
             
             // 1. HPOS (64-bit World Origin) - 24 Bytes
             buffer.writeDoubleLE(inst.hpos[0], off);
-            buffer.doubleWriteLE(inst.hpos[1], off + 8);
-            buffer.doubleWriteLE(inst.hpos[2], off + 16);
+            buffer.writeDoubleLE(inst.hpos[1], off + 8);
+            buffer.writeDoubleLE(inst.hpos[2], off + 16);
             
             // 2. Transform Matrix (4x4 Float32) - 64 Bytes
             const matArray = inst.transform.asArray();
@@ -159,7 +159,3 @@ export class TilerSDK {
     }
 }
 
-// Helper for double write alignment (Node.js Buffer specific)
-interface Buffer {
-    doubleWriteLE(value: number, offset: number): number;
-}
