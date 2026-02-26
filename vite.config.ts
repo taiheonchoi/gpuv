@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import path from 'path';
 import fs from 'fs';
 
-const MODEL_DATA_DIR = 'C:/dev/models/1018/output/sot/spec2_392';
+const MODEL_DATA_DIR = 'C:/dev/models/1018/output_spec2/sot';
 
 export default defineConfig({
     server: {

@@ -88,14 +88,28 @@ export class GlobalBufferManager {
         for (let i = 0; i < count; i++) {
             const batchOffset = (this._instanceCount + i) * 4;
             this._batchIdData[batchOffset] = batchIds[i];
-            // batchIdData[batchOffset + 1]... could hold other meta-data later
+        }
+
+        // Partial GPU upload: only write the newly appended region instead of full buffer
+        const device = (this._engine as any)._device as GPUDevice;
+        const trsByteOffset = trsOffset * 4; // float32 → bytes
+        const trsByteSize = count * 16 * 4;
+        const batchByteOffset = this._instanceCount * 4 * 4; // 4 uint32s per instance → bytes
+        const batchByteSize = count * 4 * 4;
+
+        const trsGpuBuffer = (this.instanceTRSBuffer.getBuffer() as any).underlyingResource as GPUBuffer | undefined;
+        const batchGpuBuffer = (this.batchIdBuffer.getBuffer() as any).underlyingResource as GPUBuffer | undefined;
+
+        if (device && trsGpuBuffer && batchGpuBuffer) {
+            device.queue.writeBuffer(trsGpuBuffer, trsByteOffset, this._trsData.buffer, trsByteOffset, trsByteSize);
+            device.queue.writeBuffer(batchGpuBuffer, batchByteOffset, this._batchIdData.buffer, batchByteOffset, batchByteSize);
+        } else {
+            // Fallback: full buffer upload via Babylon API
+            this.instanceTRSBuffer.update(this._trsData);
+            this.batchIdBuffer.update(this._batchIdData);
         }
 
         this._instanceCount += count;
-
-        // Dispatch updates using COPY_DST underneath
-        this.instanceTRSBuffer.update(this._trsData);
-        this.batchIdBuffer.update(this._batchIdData); // Babylon handles mapping TypedArray -> ArrayBuffer view
     }
 
     /**

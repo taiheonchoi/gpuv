@@ -74,7 +74,6 @@ export class CustomTileParser {
         // Dequantize positional boundaries if the component type detects 16-bit payload (Int16 / Uint16)
         if (translationAccessor.componentType === 5122 || translationAccessor.componentType === 5123) {
             const isUint = translationAccessor.componentType === 5123;
-            // Provide a bounding block limit (defaults via accessor property bounds or a standard fallback)
             const min = translationAccessor.min || [0, 0, 0];
             const max = translationAccessor.max || [1000, 1000, 1000];
 
@@ -86,25 +85,70 @@ export class CustomTileParser {
             );
         }
 
+        // Optional ROTATION (VEC4 quaternion) and SCALE (VEC3)
+        const rotationAccessor = attributes.ROTATION !== undefined
+            ? this._getAccessorData(gltfJson, binaryBuffers, attributes.ROTATION) : null;
+        const scaleAccessor = attributes.SCALE !== undefined
+            ? this._getAccessorData(gltfJson, binaryBuffers, attributes.SCALE) : null;
+
+        const rotations = rotationAccessor ? rotationAccessor.data as Float32Array : null;
+        const scales = scaleAccessor ? scaleAccessor.data as Float32Array : null;
+
         const batchIds = new Uint32Array(batchIdAccessor.data);
         const count = batchIds.length;
 
-        // Transform the incoming Vec3 properties into a dense 4x4 matrix for unified 16-float chunking
+        // Build 4x4 column-major TRS matrices: M = T * R * S
         const packedTRS = new Float32Array(count * 16);
 
         for (let i = 0; i < count; i++) {
-            const srcIdx = i * 3;
+            const tIdx = i * 3;
             const destIdx = i * 16;
 
-            // Generate standard Identity Matrix logic (Row/Col padding mapped directly for WebGPU standard logic)
-            packedTRS[destIdx + 0] = 1; packedTRS[destIdx + 1] = 0; packedTRS[destIdx + 2] = 0; packedTRS[destIdx + 3] = 0;
-            packedTRS[destIdx + 4] = 0; packedTRS[destIdx + 5] = 1; packedTRS[destIdx + 6] = 0; packedTRS[destIdx + 7] = 0;
-            packedTRS[destIdx + 8] = 0; packedTRS[destIdx + 9] = 0; packedTRS[destIdx + 10] = 1; packedTRS[destIdx + 11] = 0;
+            const tx = finalTranslations[tIdx + 0];
+            const ty = finalTranslations[tIdx + 1];
+            const tz = finalTranslations[tIdx + 2];
 
-            // Map Translation attributes [col3] 
-            packedTRS[destIdx + 12] = finalTranslations[srcIdx + 0];
-            packedTRS[destIdx + 13] = finalTranslations[srcIdx + 1];
-            packedTRS[destIdx + 14] = finalTranslations[srcIdx + 2];
+            // Rotation quaternion (x,y,z,w) — default identity
+            let qx = 0, qy = 0, qz = 0, qw = 1;
+            if (rotations) {
+                const rIdx = i * 4;
+                qx = rotations[rIdx]; qy = rotations[rIdx + 1];
+                qz = rotations[rIdx + 2]; qw = rotations[rIdx + 3];
+            }
+
+            // Scale — default (1,1,1)
+            let sx = 1, sy = 1, sz = 1;
+            if (scales) {
+                const sIdx = i * 3;
+                sx = scales[sIdx]; sy = scales[sIdx + 1]; sz = scales[sIdx + 2];
+            }
+
+            // Compose column-major 4x4: M = T * R * S
+            // Rotation matrix from quaternion, pre-multiplied with scale
+            const x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
+            const xx = qx * x2, xy = qx * y2, xz = qx * z2;
+            const yy = qy * y2, yz = qy * z2, zz = qz * z2;
+            const wx = qw * x2, wy = qw * y2, wz = qw * z2;
+
+            // Column 0
+            packedTRS[destIdx + 0] = (1 - (yy + zz)) * sx;
+            packedTRS[destIdx + 1] = (xy + wz) * sx;
+            packedTRS[destIdx + 2] = (xz - wy) * sx;
+            packedTRS[destIdx + 3] = 0;
+            // Column 1
+            packedTRS[destIdx + 4] = (xy - wz) * sy;
+            packedTRS[destIdx + 5] = (1 - (xx + zz)) * sy;
+            packedTRS[destIdx + 6] = (yz + wx) * sy;
+            packedTRS[destIdx + 7] = 0;
+            // Column 2
+            packedTRS[destIdx + 8] = (xz + wy) * sz;
+            packedTRS[destIdx + 9] = (yz - wx) * sz;
+            packedTRS[destIdx + 10] = (1 - (xx + yy)) * sz;
+            packedTRS[destIdx + 11] = 0;
+            // Column 3 (translation)
+            packedTRS[destIdx + 12] = tx;
+            packedTRS[destIdx + 13] = ty;
+            packedTRS[destIdx + 14] = tz;
             packedTRS[destIdx + 15] = 1;
         }
 

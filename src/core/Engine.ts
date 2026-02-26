@@ -104,7 +104,6 @@ export class EngineSetup {
         // Initialize indirect render plugin (raw WebGPU pass)
         if (this._pickingManager) {
             this._indirectRenderPlugin = new IndirectRenderPlugin(this._scene, this._engine, this._pickingManager);
-            this._indirectRenderPlugin.seedTestInstances(200);
             await this._indirectRenderPlugin.initialize();
         }
 
