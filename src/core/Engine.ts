@@ -10,6 +10,9 @@ import { AppearanceManager } from './AppearanceManager';
 import { NavigationCore } from './NavigationCore';
 import { SensorLinkManager } from './SensorLinkManager';
 import { IViewerPlugin, PluginContext } from './PluginTypes';
+import { CustomTileParser } from '../loaders/CustomTileParser';
+import { AssetLibraryLoader } from '../loaders/AssetLibraryLoader';
+import { TilesetLoader } from '../loaders/TilesetLoader';
 
 export class EngineSetup {
     private _canvas: HTMLCanvasElement;
@@ -28,6 +31,8 @@ export class EngineSetup {
     private _appearanceManager: AppearanceManager | null = null;
     private _navigationCore: NavigationCore | null = null;
     private _plugins: IViewerPlugin[] = [];
+    private _tileParser!: CustomTileParser;
+    private _tilesetLoader!: TilesetLoader;
 
     constructor(canvas: HTMLCanvasElement) {
         this._canvas = canvas;
@@ -62,7 +67,7 @@ export class EngineSetup {
         // Initialize plugin infrastructure
         this._eventBus = new EventBus();
         this._panelManager = new PanelManager(this._canvas);
-        this._dataServices = new DataServices('/models/1018/output/sot');
+        this._dataServices = new DataServices('/data');
 
         // Initialize optional managers (may already exist in the codebase)
         try {
@@ -89,6 +94,10 @@ export class EngineSetup {
             const nc = this._navigationCore;
             this._eventBus.on('selection:change', (e) => nc.moveTo(e.primaryBatchId));
         }
+
+        this._tileParser = new CustomTileParser(this._scene);
+        const assetLibraryLoader = new AssetLibraryLoader(this._scene);
+        this._tilesetLoader = new TilesetLoader(this._dataServices, this._tileParser, assetLibraryLoader);
 
         this._engine.runRenderLoop(() => {
             this._sceneSetup.beginFrame();
@@ -135,6 +144,11 @@ export class EngineSetup {
 
     public get dataServices(): DataServices {
         return this._dataServices;
+    }
+
+    /** Load a tileset by URL: fetches tileset.json, sets DataServices baseUrl, loads GAL and tile GLB. */
+    public async loadTileset(tilesetUrl: string): Promise<void> {
+        await this._tilesetLoader.loadTileset(tilesetUrl);
     }
 
     public dispose(): void {

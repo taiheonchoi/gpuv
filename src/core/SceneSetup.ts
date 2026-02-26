@@ -1,4 +1,4 @@
-import { Scene, FreeCamera, Vector3, HemisphericLight, MeshBuilder, WebGPUEngine } from '@babylonjs/core';
+import { Scene, FreeCamera, Vector3, HemisphericLight, WebGPUEngine } from '@babylonjs/core';
 import * as dat from 'dat.gui';
 
 export class SceneSetup {
@@ -25,9 +25,6 @@ export class SceneSetup {
         const light = new HemisphericLight("light1", new Vector3(0, 1, 0), this._scene);
         light.intensity = 0.7;
 
-        // Visual anchor
-        MeshBuilder.CreateSphere("sphere", { diameter: 2, segments: 32 }, this._scene);
-        MeshBuilder.CreateGround("ground", { width: 10, height: 10 }, this._scene);
     }
 
     public setupPerformanceMonitoring(): void {

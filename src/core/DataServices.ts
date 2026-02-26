@@ -17,6 +17,15 @@ export class DataServices {
 
     get baseUrl(): string { return this._baseUrl; }
 
+    /** Updates baseUrl (e.g. after loading a tileset). Clears cached hierarchy/metadata. */
+    setBaseUrl(baseUrl: string): void {
+        const normalized = baseUrl.replace(/\/$/, '');
+        if (this._baseUrl === normalized) return;
+        this._baseUrl = normalized;
+        this._hierarchyPromise = null;
+        this._metadataPromise = null;
+    }
+
     async getHierarchyData(): Promise<HierarchyData> {
         if (!this._hierarchyPromise) {
             this._hierarchyPromise = fetch(`${this._baseUrl}/hierarchy.bin`)

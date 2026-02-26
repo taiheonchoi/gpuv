@@ -32,6 +32,7 @@ export class HierarchyTreeView implements IViewerPlugin {
     // Flat list state
     private _expanded = new Set<number>();
     private _flatList: FlatRow[] = [];
+    private _rootIndices: number[] = [0];
     private _searchResults: FlatRow[] | null = null;
     private _selectedIndex = -1;
 
@@ -107,8 +108,17 @@ export class HierarchyTreeView implements IViewerPlugin {
     private async _loadData(): Promise<void> {
         try {
             this._data = await this._ctx.dataServices.getHierarchyData();
-            // Start with root expanded
-            this._expanded.add(0);
+            // Find all root nodes (parentIdx === -1) and expand them
+            const data = this._data;
+            this._rootIndices = [];
+            for (let i = 0; i < data.nodeCount; i++) {
+                const node = getNode(data, i);
+                if (node.parentIdx === -1) {
+                    this._rootIndices.push(i);
+                    this._expanded.add(i);
+                }
+            }
+            console.log(`HierarchyTreeView: ${data.nodeCount} nodes, ${this._rootIndices.length} roots`);
             this._rebuildFlatList();
             this._renderVisible();
         } catch (e) {
@@ -126,8 +136,11 @@ export class HierarchyTreeView implements IViewerPlugin {
         const list: FlatRow[] = [];
         const data = this._data;
 
-        // Stack-based DFS (avoid recursion for 1.1M nodes)
-        const stack: number[] = [0]; // Start from root (index 0)
+        // Stack-based DFS — push all roots in reverse order (so first root pops first)
+        const stack: number[] = [];
+        for (let i = this._rootIndices.length - 1; i >= 0; i--) {
+            stack.push(this._rootIndices[i]);
+        }
 
         while (stack.length > 0) {
             const idx = stack.pop()!;

@@ -2,6 +2,12 @@ import { GlobalBufferManager } from '../core/GlobalBufferManager';
 import { Quantization } from '../utils/Quantization';
 import { Scene } from '@babylonjs/core';
 
+/** Parsed URIs from tileset.json for content and optional GAL. */
+export interface TilesetUris {
+    contentUri: string;
+    assetLibraryUri?: string;
+}
+
 /**
  * Handles custom streaming and decoding for Custom Spec 2.0 3D Tiles.
  * Responsible for memory-efficient EXT_mesh_gpu_instancing payload handling.
@@ -19,13 +25,17 @@ export class CustomTileParser {
     /**
      * Evaluates the Tileset payload to detect the `custom_spec: "2.0"` override.
      */
-    public parseTilesetJson(tilesetJson: any): void {
+    public parseTilesetJson(tilesetJson: any): TilesetUris {
         this._isCustomSpec2 = !!(tilesetJson.asset?.custom_spec === "2.0" || tilesetJson.custom_spec === "2.0");
         if (this._isCustomSpec2) {
             console.log("CustomTileParser: Custom Spec 2.0 detected in tileset.json. GAL scaling logic engaged.");
         } else {
             console.warn("CustomTileParser: Tileset lacks ‘custom_spec: 2.0’. Using strict standard fallback.");
         }
+
+        const contentUri = tilesetJson.root?.content?.uri ?? "";
+        const assetLibraryUri = tilesetJson.extensions?.LCL_spatial_context?.assetLibraryUri;
+        return { contentUri, assetLibraryUri };
     }
 
     /**

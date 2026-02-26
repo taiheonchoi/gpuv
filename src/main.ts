@@ -13,6 +13,11 @@ async function bootstrap() {
     // Register UI plugins
     await engineSetup.registerPlugin(new HierarchyTreeView());
     await engineSetup.registerPlugin(new PropertyView());
+
+    const tilesetUrl = new URLSearchParams(window.location.search).get('tileset');
+    if (tilesetUrl) {
+        await engineSetup.loadTileset(tilesetUrl);
+    }
 }
 
 bootstrap().catch(console.error);
