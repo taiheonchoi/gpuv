@@ -13,6 +13,7 @@ import { IViewerPlugin, PluginContext } from './PluginTypes';
 import { CustomTileParser } from '../loaders/CustomTileParser';
 import { AssetLibraryLoader } from '../loaders/AssetLibraryLoader';
 import { TilesetLoader } from '../loaders/TilesetLoader';
+import { IndirectRenderPlugin } from '../plugins/IndirectRenderPlugin';
 
 export class EngineSetup {
     private _canvas: HTMLCanvasElement;
@@ -33,6 +34,7 @@ export class EngineSetup {
     private _plugins: IViewerPlugin[] = [];
     private _tileParser!: CustomTileParser;
     private _tilesetLoader!: TilesetLoader;
+    private _indirectRenderPlugin: IndirectRenderPlugin | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
         this._canvas = canvas;
@@ -99,6 +101,13 @@ export class EngineSetup {
         const assetLibraryLoader = new AssetLibraryLoader(this._scene);
         this._tilesetLoader = new TilesetLoader(this._dataServices, this._tileParser, assetLibraryLoader);
 
+        // Initialize indirect render plugin (raw WebGPU pass)
+        if (this._pickingManager) {
+            this._indirectRenderPlugin = new IndirectRenderPlugin(this._scene, this._engine, this._pickingManager);
+            this._indirectRenderPlugin.seedTestInstances(200);
+            await this._indirectRenderPlugin.initialize();
+        }
+
         this._engine.runRenderLoop(() => {
             this._sceneSetup.beginFrame();
             this._scene.render();
@@ -159,6 +168,7 @@ export class EngineSetup {
         }
         this._plugins = [];
 
+        this._indirectRenderPlugin?.dispose();
         this._selectionController?.dispose();
         this._pickingManager?.dispose();
         this._panelManager.dispose();

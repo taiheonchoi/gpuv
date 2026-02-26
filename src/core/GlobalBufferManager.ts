@@ -13,6 +13,10 @@ export class GlobalBufferManager {
     public indirectDrawBuffer!: StorageBuffer;
     public sensorStateBuffer!: StorageBuffer;
 
+    // Native GPUBuffer for indirect draw — needs INDIRECT usage flag that
+    // Babylon's StorageBuffer doesn't support
+    public indirectDrawGpuBuffer!: GPUBuffer;
+
     private _trsData: Float32Array;
     private _batchIdData: Uint32Array;
     private _indirectDrawData: Uint32Array;
@@ -55,6 +59,14 @@ export class GlobalBufferManager {
         // 1 float per instance: health/appearance state for ghost_effect.wgsl & clash_detection.wgsl
         this.sensorStateBuffer = new StorageBuffer(this._engine, this.INITIAL_INSTANCE_CAPACITY * 4, flags);
 
+        // Native indirect buffer with INDIRECT usage for drawIndexedIndirect()
+        const device = (this._engine as any)._device as GPUDevice;
+        this.indirectDrawGpuBuffer = device.createBuffer({
+            label: 'indirect-draw-native',
+            size: this._indirectDrawData.byteLength,
+            usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.STORAGE,
+        });
+
         console.log(`Global Storage Buffers Allocated. Initial Capacity: ${this.INITIAL_INSTANCE_CAPACITY} instances.`);
     }
 
@@ -94,11 +106,29 @@ export class GlobalBufferManager {
         const offset = commandIndex * 5;
         this._indirectDrawData[offset + 1] = Math.max(0, this._indirectDrawData[offset + 1] + instanceCountDelta);
         this.indirectDrawBuffer.update(this._indirectDrawData);
+        // Also sync native indirect buffer (has INDIRECT usage flag)
+        const device = (this._engine as any)._device as GPUDevice;
+        if (device && this.indirectDrawGpuBuffer) {
+            device.queue.writeBuffer(this.indirectDrawGpuBuffer, 0, this._indirectDrawData.buffer);
+        }
     }
 
     // Maintained for backward compatibility with Phase 0 Setup skeleton
     public initializeDummyBuffer(): void {
         // Now handled by internal initialization
+    }
+
+    /** Sync the native indirect draw buffer (with INDIRECT flag) from current CPU data */
+    public syncIndirectDrawNative(): void {
+        const device = (this._engine as any)._device as GPUDevice;
+        if (device && this.indirectDrawGpuBuffer) {
+            device.queue.writeBuffer(this.indirectDrawGpuBuffer, 0, this._indirectDrawData.buffer);
+        }
+    }
+
+    /** Direct access to indirect draw data for setting indexCount etc. */
+    public get indirectDrawData(): Uint32Array {
+        return this._indirectDrawData;
     }
 
     /**
@@ -110,6 +140,7 @@ export class GlobalBufferManager {
         this.batchIdBuffer?.dispose();
         this.indirectDrawBuffer?.dispose();
         this.sensorStateBuffer?.dispose();
+        this.indirectDrawGpuBuffer?.destroy();
 
         this._trsData = new Float32Array(0);
         this._batchIdData = new Uint32Array(0);
