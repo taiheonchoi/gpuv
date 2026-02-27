@@ -1,11 +1,12 @@
 // Custom Spec 2.0 WebGPU Indirect Shader
-// Handles high-scale PBR lighting, batch ID instance reading, Picking, and LOD Dissolve logic.
+// Handles high-scale PBR lighting, batch ID instance reading, and LOD Dissolve logic.
 
 struct Uniforms {
     viewProjection: mat4x4<f32>,
     cameraPosition: vec3<f32>,
-    highlightedBatchId: u32,
-    time: f32, // Passed from CPU frame interval
+    highlightedBatchId: u32,   // Reserved: selection highlight (blue glow when batchId matches)
+    time: f32,                 // Reserved: LOD dissolve dither, pulse effects
+    _pad0: u32,                // Reserved (was firstInstance — now using builtin instance_index)
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -46,13 +47,12 @@ struct VertexOutput {
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
 
-    // Fetch the real global index from the indirection buffer populated by the Culling Compute Shader
-    let global_index = visibleInstanceIndices[input.instance_index];
-
-    let instance = instanceBuffers[global_index];
-    let batchId = batchIdBuffers[global_index].id;
-
-    // Reconstruct 4x4 matrix from standard std430 contiguous streams mapped in Phase 1
+    // WebGPU instance_index = firstInstance + i (i=0..instanceCount-1).
+    // firstInstance is set per-draw in the indirect args buffer, so instance_index
+    // already points to the correct region of the remap buffer.
+    let trsIndex = visibleInstanceIndices[input.instance_index];
+    let instance = instanceBuffers[trsIndex];
+    let batchId = batchIdBuffers[trsIndex].id;
     let modelMatrix = mat4x4<f32>(
         instance.modelMatrix0,
         instance.modelMatrix1,
@@ -60,57 +60,38 @@ fn vs_main(input: VertexInput) -> VertexOutput {
         instance.modelMatrix3
     );
 
-    let worldPosition = modelMatrix * vec4<f32>(input.position, 1.0);
-    output.position = uniforms.viewProjection * worldPosition;
+    // Babylon.js stores matrices row-major. WGSL reads buffer as column-major.
+    // So model/VP matrices in WGSL are effectively transposed.
+    // Use vec*mat (row-vector multiplication) which computes M^T * v = correct result.
+    let worldPosition = vec4<f32>(input.position, 1.0) * modelMatrix;
+
+    output.position = worldPosition * uniforms.viewProjection;
     output.worldPos = worldPosition.xyz;
-    
-    // Normal transform (assuming orthogonal TRS without nonuniform scaling for simplicity)
-    output.normal = (modelMatrix * vec4<f32>(input.normal, 0.0)).xyz;
+    output.normal = (vec4<f32>(input.normal, 0.0) * modelMatrix).xyz;
     output.batchId = batchId;
 
     return output;
 }
 
-struct FragmentOutput {
-    @location(0) color: vec4<f32>,
-    // R32Uint Picking Render Target output hook
-    @location(1) idOutput: u32, 
-}
-
-// Interleaved Gradient Noise formula for efficient GPU Dither Dissolve
-fn rand(uv: vec2<f32>) -> f32 {
-    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
-    return fract(magic.z * fract(dot(uv, magic.xy)));
+// Hash a u32 to a pseudo-random RGB color for per-object visualization
+fn hashColor(id: u32) -> vec3<f32> {
+    let r = fract(f32(id) * 0.3183099 + 0.1);
+    let g = fract(f32(id) * 0.1517823 + 0.7);
+    let b = fract(f32(id) * 0.0714321 + 0.4);
+    return vec3<f32>(r, g, b);
 }
 
 @fragment
-fn fs_main(input: VertexOutput) -> FragmentOutput {
-    var output: FragmentOutput;
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    // Per-instance color from batchId hash
+    let baseColor = hashColor(input.batchId);
 
-    // LOD Dissolve blending effect (Hides sudden popping of geometry)
-    let dither = rand(input.position.xy);
-    let dissolveThreshold = 0.05 + sin(uniforms.time) * 0.02; // Subtle pulsing blend example limit
-    if (dither < dissolveThreshold) {
-        discard;
-    }
+    // Simple hemisphere lighting
+    let N = normalize(input.normal);
+    let L = normalize(vec3<f32>(0.3, 1.0, 0.5));
+    let NdotL = max(dot(N, L), 0.0);
+    let ambient = 0.3;
+    let lit = baseColor * (ambient + (1.0 - ambient) * NdotL);
 
-    let normal = normalize(input.normal);
-    
-    // Core PBR directional lighting stub mapped specifically for complex structure
-    let lightDir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let diffuse = max(dot(normal, lightDir), 0.0);
-    
-    var baseColor = vec3<f32>(0.5, 0.7, 0.9) * (diffuse * 0.8 + 0.2); // Engineering Blueprint Theme Default
-
-    // Interactive GPU ID highlight override mapped statically from uniforms
-    if (input.batchId == uniforms.highlightedBatchId) {
-        // Emit vivid warning hue for selecting an instance component
-        baseColor = vec3<f32>(1.0, 0.3, 0.1); 
-    }
-
-    output.color = vec4<f32>(baseColor, 1.0);
-    // Explicit BatchID propagation mapped safely outside traditional visual color limits
-    output.idOutput = input.batchId;
-
-    return output;
+    return vec4<f32>(lit, 1.0);
 }

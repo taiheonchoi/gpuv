@@ -26,7 +26,7 @@ The engine avoids CPU-side per-mesh loops. Instead:
 1. **GlobalBufferManager** (singleton) pre-allocates large `StorageBuffer`s on the GPU for instance TRS matrices (16 floats/instance, std430 aligned), batch IDs (16-byte aligned), and indirect draw arguments
 2. **ComputeCullingManager** runs frustum + Hi-Z occlusion culling entirely on GPU via compute shaders, writing surviving instance indices atomically into `visibleInstanceIndices`
 3. **WebGPUIndirectBatcher** issues `drawIndexedIndirect` calls that read instance counts from the GPU-written indirect buffer — zero CPU iteration
-4. **IndirectRenderPlugin** hooks into Babylon.js `onBeforeRenderObservable` to inject the custom low-level render pass, bypassing Babylon's built-in CPU culling
+4. **IndirectRenderPlugin** hooks into Babylon.js `onEndFrameObservable` to inject a custom low-level render pass with its own `GPUCommandEncoder`, bypassing Babylon's built-in CPU culling
 
 ### Data Flow: Tiles → GPU
 

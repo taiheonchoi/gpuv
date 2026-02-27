@@ -15,8 +15,14 @@ async function bootstrap() {
     await engineSetup.registerPlugin(new PropertyView());
 
     const tilesetUrl = new URLSearchParams(window.location.search).get('tileset')
-        || '/data/tileset.json';
-    await engineSetup.loadTileset(tilesetUrl);
+        || '/data/tiles/tileset.json';
+    try {
+        await engineSetup.loadTileset(tilesetUrl);
+    } catch (e) {
+        console.error('Tileset load failed:', tilesetUrl, e);
+    }
+    // Fallback: if no geometry (load failed or 0 instances), seed test instances so something renders
+    engineSetup.seedTestInstancesIfEmpty();
 }
 
 bootstrap().catch(console.error);

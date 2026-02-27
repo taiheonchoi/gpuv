@@ -1,4 +1,4 @@
-import { GlobalBufferManager } from '../core/GlobalBufferManager';
+import { GlobalBufferManager, MeshAtlasEntry } from '../core/GlobalBufferManager';
 import { Quantization } from '../utils/Quantization';
 import { Scene } from '@babylonjs/core';
 
@@ -6,19 +6,42 @@ import { Scene } from '@babylonjs/core';
 export interface TilesetUris {
     contentUri: string;
     assetLibraryUri?: string;
+    instanceTrsUri?: string;
+    geometricError?: number;
 }
 
 /**
  * Handles custom streaming and decoding for Custom Spec 2.0 3D Tiles.
  * Responsible for memory-efficient EXT_mesh_gpu_instancing payload handling.
+ *
+ * Geometry Atlas with Cross-Chunk Mesh Deduplication:
+ * - Extracts actual mesh geometry (POSITION + NORMAL + indices) from GLB nodes
+ * - Deduplicates meshes across ALL chunks using a vertex fingerprint
+ * - Packs unique geometries into GlobalBufferManager's shared atlas buffers
+ * - Each unique mesh gets its own indirect draw command
+ *
+ * Dedup Strategy:
+ * - Fingerprint = vertexCount|indexCount|first 3 vertex positions (6 decimal places)
+ * - Same fingerprint across different chunks → reuse atlas entry (no GPU re-upload)
+ * - Dramatically reduces VRAM for instanced models (8M instances, ~few thousand unique meshes)
  */
 export class CustomTileParser {
     private _bufferManager: GlobalBufferManager;
     private _isCustomSpec2: boolean = false;
 
+    /**
+     * Cross-chunk mesh dedup cache.
+     * Key: mesh fingerprint string
+     * Value: MeshAtlasEntry (offsets into GPU atlas)
+     *
+     * This persists across processTileGltf() calls, so meshes loaded from
+     * chunk A that match chunk B's meshes will reuse the same GPU geometry.
+     */
+    private _globalMeshCache = new Map<string, MeshAtlasEntry>();
+    private _meshCacheHits = 0;
+    private _meshCacheMisses = 0;
+
     constructor(_scene: Scene) {
-        // Scene dependency kept for future extensions, but removed from class fields to satisfy TS strict checks.
-        // Connect directly to the WebGPU SSBO handler
         this._bufferManager = GlobalBufferManager.getInstance();
     }
 
@@ -26,62 +49,285 @@ export class CustomTileParser {
      * Evaluates the Tileset payload to detect the `custom_spec: "2.0"` override.
      */
     public parseTilesetJson(tilesetJson: any): TilesetUris {
-        this._isCustomSpec2 = !!(tilesetJson.asset?.custom_spec === "2.0" || tilesetJson.custom_spec === "2.0");
+        this._isCustomSpec2 = !!(
+            tilesetJson.asset?.custom_spec === "2.0" ||
+            tilesetJson.asset?.custom_spec === "2.5" ||
+            tilesetJson.custom_spec === "2.0" ||
+            tilesetJson.custom_spec === "2.5"
+        );
         if (this._isCustomSpec2) {
-            console.log("CustomTileParser: Custom Spec 2.0 detected in tileset.json. GAL scaling logic engaged.");
+            console.log("CustomTileParser: Custom Spec 2.0/2.5 detected in tileset.json.");
         } else {
-            console.warn("CustomTileParser: Tileset lacks ‘custom_spec: 2.0’. Using strict standard fallback.");
+            console.warn("CustomTileParser: Tileset lacks 'custom_spec: 2.0'. Using strict standard fallback.");
         }
 
         const contentUri = tilesetJson.root?.content?.uri ?? "";
-        const assetLibraryUri = tilesetJson.extensions?.LCL_spatial_context?.assetLibraryUri;
-        return { contentUri, assetLibraryUri };
+        const ext = tilesetJson.extensions?.LCL_spatial_context;
+        const assetLibraryUri = ext?.assetLibraryUri;
+        const instanceTrsUri = ext?.instanceTrsUri;
+        const geometricError = tilesetJson.geometricError ?? tilesetJson.root?.geometricError;
+        return { contentUri, assetLibraryUri, instanceTrsUri, geometricError };
     }
 
     /**
-     * Primary hook into tile parsing logic. Dissects GLTF/GLB internal buffers 
+     * Primary hook into tile parsing logic. Dissects GLTF/GLB internal buffers
      * and isolates Instancing overrides.
+     *
+     * For each node with a mesh + EXT_mesh_gpu_instancing:
+     * 1. Extract mesh geometry → fingerprint → dedup via _globalMeshCache
+     * 2. Extract TRS + batchId from instancing extension → append instances
+     * 3. Wire up the indirect draw command for this mesh
+     *
+     * Nodes sharing the same mesh index within a single GLB reuse the same
+     * draw command (intra-GLB dedup). The _globalMeshCache provides cross-chunk
+     * dedup so identical meshes from different GLBs also share GPU geometry.
      */
     public processTileGltf(gltfJson: any, binaryBuffers: ArrayBuffer[]): void {
         if (!this._isCustomSpec2 || !gltfJson.nodes) return;
 
-        gltfJson.nodes.forEach((node: any) => {
+        // Intra-GLB dedup: mesh index → atlas entry (within this GLB)
+        const localMeshMap = new Map<number, MeshAtlasEntry>();
+
+        // Collect per-draw-command instances:
+        // drawCommandIndex → { trsArrays[], batchIdArrays[], totalCount }
+        const pendingInstances = new Map<number, {
+            trsList: Float32Array[];
+            batchIdList: Uint32Array[];
+            totalCount: number;
+        }>();
+
+        for (const node of gltfJson.nodes) {
             const instancingExt = node.extensions?.EXT_mesh_gpu_instancing;
-            if (instancingExt) {
-                this._extractAndStreamInstancingData(gltfJson, binaryBuffers, instancingExt);
+            if (!instancingExt) continue;
+
+            const meshIndex: number | undefined = node.mesh;
+            if (meshIndex === undefined) continue;
+
+            // Step 1: Extract or reuse mesh geometry (intra-GLB + cross-chunk dedup)
+            let atlasEntry: MeshAtlasEntry;
+            if (localMeshMap.has(meshIndex)) {
+                // Same mesh index within this GLB — reuse
+                atlasEntry = localMeshMap.get(meshIndex)!;
+            } else {
+                // Try cross-chunk dedup via fingerprint
+                atlasEntry = this._extractMeshGeometryDeduped(gltfJson, binaryBuffers, meshIndex);
+                if (atlasEntry.drawCommandIndex < 0) continue;
+                localMeshMap.set(meshIndex, atlasEntry);
             }
-        });
+
+            // Step 2: Extract TRS + batchId from instancing extension
+            const instanceData = this._extractInstancingData(gltfJson, binaryBuffers, instancingExt);
+            if (!instanceData) continue;
+
+            // Step 3: Accumulate instances for this draw command
+            const cmdIdx = atlasEntry.drawCommandIndex;
+            if (!pendingInstances.has(cmdIdx)) {
+                pendingInstances.set(cmdIdx, { trsList: [], batchIdList: [], totalCount: 0 });
+            }
+            const pending = pendingInstances.get(cmdIdx)!;
+            pending.trsList.push(instanceData.packedTRS);
+            pending.batchIdList.push(instanceData.batchIds);
+            pending.totalCount += instanceData.batchIds.length;
+        }
+
+        // Step 4: Upload all instances and update draw commands
+        for (const [cmdIdx, pending] of pendingInstances) {
+            const firstInstance = this._bufferManager.instanceCount;
+
+            for (let i = 0; i < pending.trsList.length; i++) {
+                this._bufferManager.appendInstanceData(pending.trsList[i], pending.batchIdList[i]);
+            }
+
+            // For cross-chunk dedup, multiple chunks may contribute instances
+            // to the same draw command. Use addDrawCommandInstances() which
+            // accumulates rather than overwrites.
+            this._bufferManager.addDrawCommandInstances(cmdIdx, pending.totalCount, firstInstance);
+        }
     }
 
     /**
-     * Parses the extension payload, reads translation + batchID, processes quantization,
-     * formats it securely to `std430`, and routes it directly to WebGPU bounds.
+     * Extracts mesh geometry with cross-chunk deduplication.
+     *
+     * Computes a fingerprint from vertex/index counts + first vertex positions.
+     * If a matching fingerprint exists in _globalMeshCache, reuses the existing
+     * atlas entry (no GPU re-upload). Otherwise extracts and uploads new geometry.
      */
-    private _extractAndStreamInstancingData(gltfJson: any, binaryBuffers: ArrayBuffer[], instancingExt: any): void {
+    private _extractMeshGeometryDeduped(
+        gltfJson: any,
+        binaryBuffers: ArrayBuffer[],
+        meshIndex: number
+    ): MeshAtlasEntry {
+        const mesh = gltfJson.meshes?.[meshIndex];
+        if (!mesh?.primitives?.length) {
+            return { drawCommandIndex: -1, baseVertex: 0, firstIndex: 0, indexCount: 0 };
+        }
+
+        const primitive = mesh.primitives[0];
+
+        // Extract POSITION (required for fingerprinting)
+        const posAccessorIdx = primitive.attributes?.POSITION;
+        if (posAccessorIdx === undefined) {
+            return { drawCommandIndex: -1, baseVertex: 0, firstIndex: 0, indexCount: 0 };
+        }
+        const posData = this._getAccessorData(gltfJson, binaryBuffers, posAccessorIdx);
+        if (!posData) {
+            return { drawCommandIndex: -1, baseVertex: 0, firstIndex: 0, indexCount: 0 };
+        }
+        const positions = posData.data as Float32Array;
+        const vertexCount = positions.length / 3;
+
+        // Extract indices count for fingerprinting
+        if (primitive.indices === undefined) {
+            return { drawCommandIndex: -1, baseVertex: 0, firstIndex: 0, indexCount: 0 };
+        }
+        const idxData = this._getAccessorData(gltfJson, binaryBuffers, primitive.indices);
+        if (!idxData) {
+            return { drawCommandIndex: -1, baseVertex: 0, firstIndex: 0, indexCount: 0 };
+        }
+        const indexCount = idxData.data.length;
+
+        // Compute fingerprint for cross-chunk dedup
+        // Format: vertexCount|indexCount|p0x|p0y|p0z|p1x|p1y|p1z|p2x|p2y|p2z
+        // Using first 3 vertices (9 floats) rounded to 4 decimal places
+        const fp = this._computeMeshFingerprint(positions, vertexCount, indexCount);
+
+        // Check cross-chunk cache
+        const cached = this._globalMeshCache.get(fp);
+        if (cached) {
+            this._meshCacheHits++;
+            if ((this._meshCacheHits + this._meshCacheMisses) % 500 === 0) {
+                this._logDedupStats();
+            }
+            return cached;
+        }
+
+        // Cache miss — extract full geometry and upload to atlas
+        this._meshCacheMisses++;
+
+        // Extract NORMAL (optional)
+        let normals: Float32Array;
+        const normalAccessorIdx = primitive.attributes?.NORMAL;
+        if (normalAccessorIdx !== undefined) {
+            const normalData = this._getAccessorData(gltfJson, binaryBuffers, normalAccessorIdx);
+            normals = normalData ? normalData.data as Float32Array : new Float32Array(vertexCount * 3);
+        } else {
+            normals = new Float32Array(vertexCount * 3);
+            for (let i = 0; i < vertexCount; i++) {
+                normals[i * 3 + 1] = 1.0; // flat up normal fallback
+            }
+        }
+
+        // Convert indices to Uint32
+        let indices32: Uint32Array;
+        if (idxData.data instanceof Uint32Array) {
+            indices32 = idxData.data;
+        } else {
+            indices32 = new Uint32Array(idxData.data.length);
+            for (let i = 0; i < idxData.data.length; i++) {
+                indices32[i] = idxData.data[i];
+            }
+        }
+
+        // Interleave position + normal → Float32Array (6 floats per vertex)
+        const interleaved = new Float32Array(vertexCount * 6);
+        for (let i = 0; i < vertexCount; i++) {
+            const src = i * 3;
+            const dst = i * 6;
+            interleaved[dst + 0] = positions[src + 0];
+            interleaved[dst + 1] = positions[src + 1];
+            interleaved[dst + 2] = positions[src + 2];
+            interleaved[dst + 3] = normals[src + 0];
+            interleaved[dst + 4] = normals[src + 1];
+            interleaved[dst + 5] = normals[src + 2];
+        }
+
+        const entry = this._bufferManager.appendMeshGeometry(interleaved, indices32);
+
+        // Store in global cache for cross-chunk reuse
+        if (entry.drawCommandIndex >= 0) {
+            this._globalMeshCache.set(fp, entry);
+        }
+
+        if (this._meshCacheMisses % 200 === 0) {
+            this._logDedupStats();
+        }
+
+        return entry;
+    }
+
+    /**
+     * Computes a mesh fingerprint for deduplication.
+     * Uses vertex count + index count + first 3 vertex positions (rounded).
+     *
+     * This catches the common case in instanced models where the same pipe/valve/flange
+     * geometry appears in hundreds of different spatial chunks.
+     */
+    private _computeMeshFingerprint(positions: Float32Array, vertexCount: number, indexCount: number): string {
+        // Sample first 3 vertices (or fewer if mesh is smaller)
+        const sampleCount = Math.min(vertexCount, 3);
+        const parts: string[] = [`${vertexCount}|${indexCount}`];
+
+        for (let i = 0; i < sampleCount; i++) {
+            const base = i * 3;
+            // Round to 4 decimal places to handle minor floating-point differences
+            parts.push(
+                `${(positions[base] * 10000 | 0)}`,
+                `${(positions[base + 1] * 10000 | 0)}`,
+                `${(positions[base + 2] * 10000 | 0)}`
+            );
+        }
+
+        return parts.join('|');
+    }
+
+    private _logDedupStats(): void {
+        const total = this._meshCacheHits + this._meshCacheMisses;
+        const hitRate = total > 0 ? ((this._meshCacheHits / total) * 100).toFixed(1) : '0.0';
+        console.log(
+            `CustomTileParser: Mesh dedup — ${this._globalMeshCache.size} unique meshes, ` +
+            `${this._meshCacheHits} cache hits / ${total} total (${hitRate}% reuse)`
+        );
+    }
+
+    /** Returns dedup stats for diagnostics */
+    public getDedupStats(): { uniqueMeshes: number; cacheHits: number; cacheMisses: number; hitRate: number } {
+        const total = this._meshCacheHits + this._meshCacheMisses;
+        return {
+            uniqueMeshes: this._globalMeshCache.size,
+            cacheHits: this._meshCacheHits,
+            cacheMisses: this._meshCacheMisses,
+            hitRate: total > 0 ? this._meshCacheHits / total : 0,
+        };
+    }
+
+    /**
+     * Extracts TRS matrices and batchIds from EXT_mesh_gpu_instancing attributes.
+     */
+    private _extractInstancingData(
+        gltfJson: any,
+        binaryBuffers: ArrayBuffer[],
+        instancingExt: any
+    ): { packedTRS: Float32Array; batchIds: Uint32Array } | null {
         const attributes = instancingExt.attributes;
-        if (!attributes) return;
+        if (!attributes) return null;
 
         const translationAccessor = this._getAccessorData(gltfJson, binaryBuffers, attributes.TRANSLATION);
         const batchIdAccessor = this._getAccessorData(gltfJson, binaryBuffers, attributes._BATCHID);
 
         if (!translationAccessor || !batchIdAccessor) {
             console.error("CustomTileParser: Missing TRANSLATION or _BATCHID attributes in EXT_mesh_gpu_instancing.");
-            return;
+            return null;
         }
 
         let finalTranslations = translationAccessor.data as Float32Array;
 
-        // Dequantize positional boundaries if the component type detects 16-bit payload (Int16 / Uint16)
+        // Dequantize if 16-bit payload
         if (translationAccessor.componentType === 5122 || translationAccessor.componentType === 5123) {
             const isUint = translationAccessor.componentType === 5123;
             const min = translationAccessor.min || [0, 0, 0];
             const max = translationAccessor.max || [1000, 1000, 1000];
-
             finalTranslations = Quantization.dequantizePositions(
-                translationAccessor.data as Uint16Array,
-                min,
-                max,
-                isUint
+                translationAccessor.data as Uint16Array, min, max, isUint
             );
         }
 
@@ -108,7 +354,6 @@ export class CustomTileParser {
             const ty = finalTranslations[tIdx + 1];
             const tz = finalTranslations[tIdx + 2];
 
-            // Rotation quaternion (x,y,z,w) — default identity
             let qx = 0, qy = 0, qz = 0, qw = 1;
             if (rotations) {
                 const rIdx = i * 4;
@@ -116,53 +361,36 @@ export class CustomTileParser {
                 qz = rotations[rIdx + 2]; qw = rotations[rIdx + 3];
             }
 
-            // Scale — default (1,1,1)
             let sx = 1, sy = 1, sz = 1;
             if (scales) {
                 const sIdx = i * 3;
                 sx = scales[sIdx]; sy = scales[sIdx + 1]; sz = scales[sIdx + 2];
             }
 
-            // Compose column-major 4x4: M = T * R * S
-            // Rotation matrix from quaternion, pre-multiplied with scale
             const x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
             const xx = qx * x2, xy = qx * y2, xz = qx * z2;
             const yy = qy * y2, yz = qy * z2, zz = qz * z2;
             const wx = qw * x2, wy = qw * y2, wz = qw * z2;
 
-            // Column 0
             packedTRS[destIdx + 0] = (1 - (yy + zz)) * sx;
             packedTRS[destIdx + 1] = (xy + wz) * sx;
             packedTRS[destIdx + 2] = (xz - wy) * sx;
             packedTRS[destIdx + 3] = 0;
-            // Column 1
             packedTRS[destIdx + 4] = (xy - wz) * sy;
             packedTRS[destIdx + 5] = (1 - (xx + zz)) * sy;
             packedTRS[destIdx + 6] = (yz + wx) * sy;
             packedTRS[destIdx + 7] = 0;
-            // Column 2
             packedTRS[destIdx + 8] = (xz + wy) * sz;
             packedTRS[destIdx + 9] = (yz - wx) * sz;
             packedTRS[destIdx + 10] = (1 - (xx + yy)) * sz;
             packedTRS[destIdx + 11] = 0;
-            // Column 3 (translation)
             packedTRS[destIdx + 12] = tx;
             packedTRS[destIdx + 13] = ty;
             packedTRS[destIdx + 14] = tz;
             packedTRS[destIdx + 15] = 1;
         }
 
-        // Write directly to GPU VRAM queue via Manager
-        this._bufferManager.appendInstanceData(packedTRS, batchIds);
-
-        // Target Indirect batch index 0. Assuming singular mesh linkage mapping out of simplicity.
-        // Increments rendering scale by the number of parsed tiles
-        this._bufferManager.updateIndirectDrawCommand(0, count);
-
-        // Note: local TypedArray references (packedTRS, finalTranslations, batchIds) are
-        // automatically eligible for GC when this function scope exits.
-        // Do NOT delete instancingExt.attributes — it destroys tile re-parsing capability
-        // which is needed for tile unload/reload cycles in streaming scenarios.
+        return { packedTRS, batchIds };
     }
 
     /**
@@ -179,8 +407,6 @@ export class CustomTileParser {
         const componentCount = accessor.count * this._getComponentCount(accessor.type);
         let typedArray: any;
 
-        // Use buffer.slice() to create an aligned copy — avoids RangeError when
-        // byteOffset is not a multiple of the element size (e.g., Float32 requires 4-byte alignment)
         switch (accessor.componentType) {
             case 5126: { // Float32
                 const byteLen = componentCount * 4;
@@ -200,6 +426,11 @@ export class CustomTileParser {
             case 5125: { // Uint32
                 const byteLen = componentCount * 4;
                 typedArray = new Uint32Array(buffer.slice(byteOffset, byteOffset + byteLen));
+                break;
+            }
+            case 5121: { // Uint8
+                const byteLen = componentCount;
+                typedArray = new Uint8Array(buffer.slice(byteOffset, byteOffset + byteLen));
                 break;
             }
             default:

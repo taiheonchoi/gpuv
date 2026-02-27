@@ -157,6 +157,26 @@ export class EngineSetup {
     /** Load a tileset by URL: fetches tileset.json, sets DataServices baseUrl, loads GAL and tile GLB. */
     public async loadTileset(tilesetUrl: string): Promise<void> {
         await this._tilesetLoader.loadTileset(tilesetUrl);
+
+        // After tileset finalization, rebuild bind groups (render + culling)
+        if (this._indirectRenderPlugin && this._bufferManager.isFinalized) {
+            this._bufferManager.debugPrintSamples();
+            this._indirectRenderPlugin.rebuildRenderBindGroup();
+            this._indirectRenderPlugin.rebuildCullingBindGroup();
+            console.log('EngineSetup: Render + culling bind groups rebuilt after tileset load');
+        }
+    }
+
+    /**
+     * If no geometry is loaded (0 instances or not finalized), seed test instances
+     * so the indirect render pipeline at least draws something (debug/fallback).
+     */
+    public seedTestInstancesIfEmpty(): void {
+        if (!this._indirectRenderPlugin) return;
+        const hasData = this._bufferManager.isFinalized && this._bufferManager.instanceCount > 0;
+        if (hasData) return;
+        console.warn('EngineSetup: No tileset geometry — seeding 100 test instances for pipeline verification.');
+        this._indirectRenderPlugin.seedTestInstances(100);
     }
 
     public dispose(): void {

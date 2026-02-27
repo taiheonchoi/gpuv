@@ -16,8 +16,13 @@ export class SceneSetup {
     }
 
     public setupBasicScene(): void {
-        const camera = new FreeCamera("camera1", new Vector3(0, 5, -10), this._scene);
-        camera.setTarget(Vector3.Zero());
+        // Model BBOX: x=[-2252, 1832], y=[-99, 603], z=[-32, 26], center=(-210, 252, -3)
+        // 191K instances at origin (0,0,0) with sub-meter mesh parts — start there
+        const camera = new FreeCamera("camera1", new Vector3(0, 1, -3), this._scene);
+        camera.setTarget(new Vector3(0, 0, 0));
+        camera.minZ = 0.001;
+        camera.maxZ = 20000;
+        camera.speed = 2;
 
         // Use standard input attachment instead of the missing WebGPUEngine parameter
         camera.attachControl(this._engine.getRenderingCanvas(), true);

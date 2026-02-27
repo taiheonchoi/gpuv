@@ -1,15 +1,20 @@
 import { Scene, WebGPUEngine, Observer } from '@babylonjs/core';
 import { GlobalBufferManager } from '../core/GlobalBufferManager';
 import { PickingManager } from '../core/PickingManager';
+import { ComputeCullingManager } from '../core/ComputeCullingManager';
 import indirectWgsl from '../shaders/indirect.wgsl?raw';
+
+
 
 /**
  * Hooks into Babylon.js render lifecycle to inject a raw WebGPU indirect draw pass,
- * bypassing Babylon's CPU-side culling. Renders all instances in GlobalBufferManager
- * using drawIndexedIndirect with the compiled indirect.wgsl shader.
+ * bypassing Babylon's CPU-side culling.
  *
- * Uses Babylon's internal _renderEncoder so our pass is part of the same command batch,
- * avoiding double-submission conflicts with the swap chain texture.
+ * Geometry Atlas mode:
+ * - Uses shared vertex/index atlas buffers from GlobalBufferManager
+ * - Issues one drawIndexedIndirect per unique mesh (multi-draw loop)
+ * - Instance remapping via GlobalBufferManager.visibleIndicesBuffer
+ *   supports cross-chunk mesh deduplication
  */
 export class IndirectRenderPlugin {
     private _scene: Scene;
@@ -25,16 +30,19 @@ export class IndirectRenderPlugin {
     private _bindGroup!: GPUBindGroup;
     private _uniformBuffer!: GPUBuffer;
     private _uniformData = new Float32Array(24); // padded to 96 bytes
-    private _visibleIndicesBuffer!: GPUBuffer;
-    private _vertexBuffer!: GPUBuffer;
-    private _indexBuffer!: GPUBuffer;
-    private _indexCount = 0;
     private _depthTexture!: GPUTexture;
     private _depthTextureView!: GPUTextureView;
     private _depthW = 0;
     private _depthH = 0;
+    private _pipelineLayout!: GPUPipelineLayout;
+    private _shaderModule!: GPUShaderModule;
+    private _currentSampleCount = 0;
     private _initialized = false;
     private _startTime = performance.now();
+    private _frameCount = 0;
+    private _needsBindGroupRebuild = false;
+
+    private _cullingManager: ComputeCullingManager | null = null;
 
     public highlightedBatchId: number = 0;
 
@@ -54,13 +62,11 @@ export class IndirectRenderPlugin {
 
         console.log('IndirectRenderPlugin: Compiling shader and creating pipeline...');
 
-        // 1. Compile WGSL shader
         const shaderModule = this._device.createShaderModule({
             label: 'indirect.wgsl',
             code: indirectWgsl,
         });
 
-        // 2. Create bind group layout matching WGSL @group(0) @binding(0..3)
         this._bindGroupLayout = this._device.createBindGroupLayout({
             label: 'indirect-bind-group-layout',
             entries: [
@@ -71,40 +77,81 @@ export class IndirectRenderPlugin {
             ],
         });
 
-        const pipelineLayout = this._device.createPipelineLayout({
+        this._pipelineLayout = this._device.createPipelineLayout({
             label: 'indirect-pipeline-layout',
             bindGroupLayouts: [this._bindGroupLayout],
         });
 
-        // 3. Create uniform buffer
-        // Uniforms struct: mat4x4<f32>(64) + vec3<f32>(12) + u32(4) + f32(4) = 84 bytes → pad to 96
         this._uniformBuffer = this._device.createBuffer({
             label: 'indirect-uniforms',
             size: 96,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
 
-        // 4. Create identity visible-indices buffer (no culling — all instances visible)
-        this._createVisibleIndicesBuffer();
+        this._shaderModule = shaderModule;
 
-        // 5. Create procedural box mesh
-        this._createBoxMesh();
+        // Bind group uses GlobalBufferManager's visibleIndicesBuffer (remap buffer)
+        this._rebuildBindGroup();
 
-        // 6. Create depth texture
-        this._createDepthTexture();
+        // Hook into engine's onEndFrameObservable — fires AFTER Babylon finishes
+        // its render pass AND submits the command buffer. This means Babylon's
+        // resolved MSAA output is already on the swap chain, and we can render
+        // on top with our own independent encoder + submit.
+        const engineAny = this._engine as any;
+        if (engineAny.onEndFrameObservable) {
+            this._renderObserver = engineAny.onEndFrameObservable.add(() => {
+                this._executeIndirectPass();
+            });
+            console.log('IndirectRenderPlugin: Hooked into engine.onEndFrameObservable');
+        } else {
+            // Fallback: use scene.onAfterRenderObservable
+            this._renderObserver = this._scene.onAfterRenderObservable.add(() => {
+                this._executeIndirectPass();
+            });
+            console.log('IndirectRenderPlugin: Hooked into scene.onAfterRenderObservable (fallback)');
+        }
 
-        // 7. Determine color format
+        // Initialize compute culling
+        this._cullingManager = new ComputeCullingManager(this._engine);
+        this._cullingManager.initialize();
+
+        this._initialized = true;
+        console.log('IndirectRenderPlugin: Pipeline ready (Geometry Atlas + cross-chunk dedup + GPU frustum culling).');
+    }
+
+    /** Call after GlobalBufferManager.finalizeDrawCommands() to wire culling bind group */
+    public rebuildCullingBindGroup(): void {
+        if (this._cullingManager) {
+            this._cullingManager.rebuildBindGroup();
+        }
+    }
+
+    /** Rebuild render bind group after data finalization (TRS/batchId/remap buffers populated) */
+    public rebuildRenderBindGroup(): void {
+        if (!this._device || !this._bindGroupLayout) return;
+        this._rebuildBindGroup();
+        this._needsBindGroupRebuild = false;
+        console.log('IndirectRenderPlugin: Render bind group rebuilt after data finalization');
+    }
+
+    private _createPipeline(sampleCount: number): void {
+        if (sampleCount === this._currentSampleCount && this._pipeline) return;
+        this._currentSampleCount = sampleCount;
+
+        // Babylon.js WebGPU uses reversed-Z depth by default.
+        // Detect via engine property; fallback to checking scene's depth function.
+        const useReversedZ = !!(this._engine as any).useReverseDepthBuffer;
+        const depthCompare: GPUCompareFunction = useReversedZ ? 'greater' : 'less';
+
         const colorFormat = navigator.gpu!.getPreferredCanvasFormat();
-
-        // 8. Create render pipeline
         this._pipeline = this._device.createRenderPipeline({
             label: 'indirect-render-pipeline',
-            layout: pipelineLayout,
+            layout: this._pipelineLayout,
             vertex: {
-                module: shaderModule,
+                module: this._shaderModule,
                 entryPoint: 'vs_main',
                 buffers: [{
-                    arrayStride: 24, // position(vec3) + normal(vec3)
+                    arrayStride: 24,
                     stepMode: 'vertex',
                     attributes: [
                         { shaderLocation: 0, offset: 0, format: 'float32x3' },
@@ -113,113 +160,24 @@ export class IndirectRenderPlugin {
                 }],
             },
             fragment: {
-                module: shaderModule,
+                module: this._shaderModule,
                 entryPoint: 'fs_main',
-                targets: [
-                    { format: colorFormat },
-                    { format: 'r32uint' },
-                ],
+                targets: [{ format: colorFormat }],
             },
             primitive: {
                 topology: 'triangle-list',
-                cullMode: 'back',
-                frontFace: 'ccw',
+                cullMode: 'none',
             },
             depthStencil: {
                 format: 'depth24plus',
                 depthWriteEnabled: true,
-                depthCompare: 'less',
+                depthCompare,
+            },
+            multisample: {
+                count: sampleCount,
             },
         });
-
-        // 9. Create bind group
-        this._rebuildBindGroup();
-
-        // 10. Hook into render loop — use onBeforeRenderObservable so we inject our
-        // pass BEFORE Babylon's scene.render() main pass. We'll end Babylon's current
-        // render pass if one exists, inject ours, then let Babylon re-create its own.
-        this._renderObserver = this._scene.onAfterRenderObservable.add(() => {
-            this._executeIndirectPass();
-        });
-
-        this._initialized = true;
-        console.log('IndirectRenderPlugin: Pipeline ready. Rendering active.');
-    }
-
-    private _createVisibleIndicesBuffer(): void {
-        const capacity = 1000000; // Match GlobalBufferManager
-        const indices = new Uint32Array(capacity);
-        for (let i = 0; i < capacity; i++) indices[i] = i;
-
-        this._visibleIndicesBuffer = this._device.createBuffer({
-            label: 'visible-indices-identity',
-            size: indices.byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        });
-        this._device.queue.writeBuffer(this._visibleIndicesBuffer, 0, indices);
-    }
-
-    private _createBoxMesh(): void {
-        const v: number[] = [];
-        const idx: number[] = [];
-
-        const faces: [number[], number[], number[], number[], number[]][] = [
-            [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5],[0,0,1]],
-            [[0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[0.5,0.5,-0.5],[0,0,-1]],
-            [[-0.5,0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5],[-0.5,0.5,-0.5],[0,1,0]],
-            [[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[-0.5,-0.5,0.5],[0,-1,0]],
-            [[0.5,-0.5,0.5],[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[0.5,0.5,0.5],[1,0,0]],
-            [[-0.5,-0.5,-0.5],[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[-0.5,0.5,-0.5],[-1,0,0]],
-        ];
-
-        for (const face of faces) {
-            const base = v.length / 6;
-            const n = face[4];
-            for (let i = 0; i < 4; i++) {
-                const p = face[i];
-                v.push(p[0], p[1], p[2], n[0], n[1], n[2]);
-            }
-            idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
-        }
-
-        const vertexData = new Float32Array(v);
-        const indexData = new Uint32Array(idx);
-        this._indexCount = indexData.length;
-
-        this._vertexBuffer = this._device.createBuffer({
-            label: 'box-vertices',
-            size: vertexData.byteLength,
-            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        });
-        this._device.queue.writeBuffer(this._vertexBuffer, 0, vertexData);
-
-        this._indexBuffer = this._device.createBuffer({
-            label: 'box-indices',
-            size: indexData.byteLength,
-            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-        });
-        this._device.queue.writeBuffer(this._indexBuffer, 0, indexData);
-
-        // Set indexCount in indirect draw args (slot 0)
-        const indirectData = this._bufferManager.indirectDrawData;
-        indirectData[0] = this._indexCount;
-        this._bufferManager.indirectDrawBuffer.update(indirectData);
-        this._bufferManager.syncIndirectDrawNative();
-    }
-
-    private _createDepthTexture(): void {
-        const w = this._engine.getRenderWidth() || 1024;
-        const h = this._engine.getRenderHeight() || 768;
-        this._depthW = w;
-        this._depthH = h;
-
-        this._depthTexture = this._device.createTexture({
-            label: 'indirect-depth',
-            size: [w, h],
-            format: 'depth24plus',
-            usage: GPUTextureUsage.RENDER_ATTACHMENT,
-        });
-        this._depthTextureView = this._depthTexture.createView();
+        console.log(`IndirectRenderPlugin: Pipeline created (sampleCount=${sampleCount}, depthCompare=${depthCompare}, reversedZ=${useReversedZ})`);
     }
 
     private _rebuildBindGroup(): void {
@@ -233,120 +191,164 @@ export class IndirectRenderPlugin {
                 { binding: 0, resource: { buffer: this._uniformBuffer } },
                 { binding: 1, resource: { buffer: trsGpuBuffer } },
                 { binding: 2, resource: { buffer: batchIdGpuBuffer } },
-                { binding: 3, resource: { buffer: this._visibleIndicesBuffer } },
+                { binding: 3, resource: { buffer: this._bufferManager.visibleIndicesBuffer } },
             ],
         });
     }
 
     /**
-     * Core per-frame render pass. Injects into Babylon's render encoder to avoid
-     * double-submission of the swap chain texture.
+     * Core per-frame render pass using an INDEPENDENT command encoder,
+     * submitted AFTER Babylon finishes its frame (via engine.onEndFrameObservable).
+     *
+     * Gets the swap chain texture from the canvas GPU context and renders
+     * with loadOp='load' to preserve Babylon's output underneath.
      */
     private _executeIndirectPass(): void {
         if (!this._initialized) return;
+        if (!this._bufferManager.isFinalized) return;
         if (this._bufferManager.instanceCount === 0) return;
+        if (this._bufferManager.drawCommandCount === 0) return;
 
-        // Update uniform buffer
+        // Deferred bind group rebuild: ensures we reference the correct GPU buffers
+        // after data has been uploaded (StorageBuffer may recreate underlyingResource)
+        if (this._needsBindGroupRebuild) {
+            this._rebuildBindGroup();
+            this._needsBindGroupRebuild = false;
+            console.log('[IndirectRender] Bind group rebuilt (deferred)');
+        }
+
         this._updateUniforms();
 
-        // End Babylon's current render pass so we can begin our own on the same encoder
-        const eng = this._engine as any;
+        // Get the swap chain texture directly from the canvas GPU context
+        const canvas = this._engine.getRenderingCanvas();
+        if (!canvas) return;
 
-        // Babylon internally tracks _currentRenderPass. End it so we can add ours.
-        if (eng._currentRenderPass) {
-            eng._endCurrentRenderPass();
+        const gpuContext = (canvas as any).getContext('webgpu') as GPUCanvasContext;
+        if (!gpuContext) {
+            if (this._frameCount++ % 300 === 0) {
+                console.warn('[IndirectRender] BAIL: no GPUCanvasContext');
+            }
+            return;
         }
 
-        // Get the render encoder that Babylon will submit in flushFramebuffer()
-        const renderEncoder = eng._renderEncoder as GPUCommandEncoder;
-        if (!renderEncoder) return;
+        const currentTexture = gpuContext.getCurrentTexture();
+        if (!currentTexture) {
+            if (this._frameCount++ % 300 === 0) {
+                console.warn('[IndirectRender] BAIL: no currentTexture');
+            }
+            return;
+        }
 
-        // Get swap chain texture view
-        const context = eng._context as GPUCanvasContext;
-        if (!context) return;
-        const swapChainTexture = context.getCurrentTexture();
-        const colorView = swapChainTexture.createView();
+        const targetView = currentTexture.createView();
+        const sampleCount = 1;
 
-        // Resize depth texture if needed
-        const w = swapChainTexture.width;
-        const h = swapChainTexture.height;
-        if (w !== this._depthW || h !== this._depthH) {
-            this._depthTexture.destroy();
-            this._depthW = w;
-            this._depthH = h;
-            this._depthTexture = this._device.createTexture({
-                label: 'indirect-depth',
-                size: [w, h],
-                format: 'depth24plus',
-                usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        // Depth clear: reversed-Z → clear to 0.0, normal → clear to 1.0
+        const useReversedZ = !!(this._engine as any).useReverseDepthBuffer;
+        const depthClearValue = useReversedZ ? 0.0 : 1.0;
+
+        try {
+            this._createPipeline(sampleCount);
+
+            const w = currentTexture.width;
+            const h = currentTexture.height;
+            if (w !== this._depthW || h !== this._depthH) {
+                if (this._depthTexture) this._depthTexture.destroy();
+                this._depthW = w;
+                this._depthH = h;
+                this._depthTexture = this._device.createTexture({
+                    label: 'indirect-depth',
+                    size: [w, h],
+                    format: 'depth24plus',
+                    sampleCount: 1,
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+                });
+                this._depthTextureView = this._depthTexture.createView();
+            }
+
+            // Create our OWN command encoder
+            const commandEncoder = this._device.createCommandEncoder({
+                label: 'indirect-render-encoder',
             });
-            this._depthTextureView = this._depthTexture.createView();
+
+            // GPU frustum culling: temporarily disabled for Atlas First debugging
+            // TODO: re-enable after verifying geometry renders correctly
+            // if (this._cullingManager?.isReady && this._scene.activeCamera) {
+            //     this._cullingManager.dispatchCulling(commandEncoder, this._scene.activeCamera);
+            // }
+
+            const renderPass = commandEncoder.beginRenderPass({
+                label: 'indirect-render-pass',
+                colorAttachments: [{
+                    view: targetView,
+                    loadOp: 'load' as GPULoadOp,
+                    storeOp: 'store' as GPUStoreOp,
+                }],
+                depthStencilAttachment: {
+                    view: this._depthTextureView,
+                    depthLoadOp: 'clear' as GPULoadOp,
+                    depthClearValue,
+                    depthStoreOp: 'store' as GPUStoreOp,
+                },
+            });
+
+            renderPass.setPipeline(this._pipeline);
+            renderPass.setBindGroup(0, this._bindGroup);
+            renderPass.setVertexBuffer(0, this._bufferManager.vertexAtlasBuffer);
+            renderPass.setIndexBuffer(this._bufferManager.indexAtlasBuffer, 'uint32');
+
+            // Multi-draw loop: one drawIndexedIndirect per unique mesh.
+            // WebGPU instance_index = firstInstance + i, so the indirect buffer's
+            // firstInstance field already offsets into the remap buffer — no per-draw
+            // uniform write needed.
+            const cmdCount = this._bufferManager.drawCommandCount;
+            for (let i = 0; i < cmdCount; i++) {
+                renderPass.drawIndexedIndirect(this._bufferManager.indirectDrawGpuBuffer, i * 20);
+            }
+
+            renderPass.end();
+
+            // Submit our independent command buffer
+            this._device.queue.submit([commandEncoder.finish()]);
+
+            this._frameCount++;
+            if (this._frameCount === 1) {
+                this._logFirstFrameDiagnostics(cmdCount, w, h, useReversedZ);
+            }
+        } catch (e: any) {
+            if (this._frameCount++ % 300 === 0) {
+                console.error('IndirectRenderPlugin render error:', e.message);
+            }
         }
+    }
 
-        // Begin our custom render pass on Babylon's encoder
-        const renderPass = renderEncoder.beginRenderPass({
-            label: 'indirect-render-pass',
-            colorAttachments: [
-                {
-                    view: colorView,
-                    loadOp: 'load' as GPULoadOp,   // Preserve Babylon's scene background
-                    storeOp: 'store' as GPUStoreOp,
-                },
-                {
-                    view: this._pickingManager.pickingTextureView,
-                    loadOp: 'clear' as GPULoadOp,
-                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                    storeOp: 'store' as GPUStoreOp,
-                },
-            ],
-            depthStencilAttachment: {
-                view: this._depthTextureView,
-                depthLoadOp: 'clear' as GPULoadOp,
-                depthClearValue: 1.0,
-                depthStoreOp: 'store' as GPUStoreOp,
-            },
-        });
-
-        renderPass.setPipeline(this._pipeline);
-        renderPass.setBindGroup(0, this._bindGroup);
-        renderPass.setVertexBuffer(0, this._vertexBuffer);
-        renderPass.setIndexBuffer(this._indexBuffer, 'uint32');
-
-        // Draw using native indirect buffer (has INDIRECT usage flag)
-        renderPass.drawIndexedIndirect(this._bufferManager.indirectDrawGpuBuffer, 0);
-
-        renderPass.end();
+    /** First-frame diagnostics: summary of render state */
+    private _logFirstFrameDiagnostics(cmdCount: number, w: number, h: number, reversedZ: boolean): void {
+        console.log(`[IndirectRender] First frame: ${cmdCount} draw cmds, ${this._bufferManager.instanceCount} instances, ${w}x${h}, reversedZ=${reversedZ}`);
     }
 
     private _updateUniforms(): void {
         const camera = this._scene.activeCamera;
         if (!camera) return;
 
-        // viewProjection = view * projection
-        // Babylon row-major storage maps directly to WGSL column-major read
-        const vp = camera.getViewMatrix().multiply(camera.getProjectionMatrix());
-        const vpArr = vp.toArray();
-        for (let i = 0; i < 16; i++) this._uniformData[i] = vpArr[i];
+        const vp = camera.getTransformationMatrix();
+        const src = vp.toArray();
+        for (let i = 0; i < 16; i++) this._uniformData[i] = src[i];
 
-        // camera position (offset 64 bytes = float index 16)
         const camPos = camera.position;
         this._uniformData[16] = camPos.x;
         this._uniformData[17] = camPos.y;
         this._uniformData[18] = camPos.z;
 
-        // highlightedBatchId (u32, at byte offset 76 = float index 19)
         const u32View = new Uint32Array(this._uniformData.buffer, 19 * 4, 1);
         u32View[0] = this.highlightedBatchId;
 
-        // time (at byte offset 80 = float index 20)
         this._uniformData[20] = (performance.now() - this._startTime) / 1000.0;
 
-        // Write full 96 bytes (struct size with padding)
         this._device.queue.writeBuffer(this._uniformBuffer, 0, this._uniformData.buffer, 0, 96);
     }
 
     /**
-     * Seed test instances into GlobalBufferManager for pipeline verification.
+     * Seed test instances for pipeline verification.
      */
     public seedTestInstances(count: number = 100): void {
         const trs = new Float32Array(count * 16);
@@ -366,11 +368,39 @@ export class IndirectRenderPlugin {
             trs[base + 14] = z;
             trs[base + 15] = 1;
 
-            batchIds[i] = i + 1; // batchId 0 = miss
+            batchIds[i] = i + 1;
         }
 
-        this._bufferManager.appendInstanceData(trs, batchIds);
-        console.log(`IndirectRenderPlugin: Seeded ${count} test instances`);
+        // Create a test box mesh in the atlas
+        this._seedBoxGeometry();
+
+        const firstTrs = this._bufferManager.appendInstanceData(trs, batchIds);
+        this._bufferManager.addDrawCommandInstances(0, count, firstTrs);
+        this._bufferManager.finalizeDrawCommands();
+        console.log(`IndirectRenderPlugin: Seeded ${count} test instances (finalizeDrawCommands called)`);
+    }
+
+    private _seedBoxGeometry(): void {
+        const v: number[] = [];
+        const idx: number[] = [];
+        const faces: [number[], number[], number[], number[], number[]][] = [
+            [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5],[0,0,1]],
+            [[0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[0.5,0.5,-0.5],[0,0,-1]],
+            [[-0.5,0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5],[-0.5,0.5,-0.5],[0,1,0]],
+            [[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[-0.5,-0.5,0.5],[0,-1,0]],
+            [[0.5,-0.5,0.5],[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[0.5,0.5,0.5],[1,0,0]],
+            [[-0.5,-0.5,-0.5],[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[-0.5,0.5,-0.5],[-1,0,0]],
+        ];
+        for (const face of faces) {
+            const base = v.length / 6;
+            const n = face[4];
+            for (let i = 0; i < 4; i++) {
+                const p = face[i];
+                v.push(p[0], p[1], p[2], n[0], n[1], n[2]);
+            }
+            idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        }
+        this._bufferManager.appendMeshGeometry(new Float32Array(v), new Uint32Array(idx));
     }
 
     public async clickPickAsync(x: number, y: number): Promise<number> {
@@ -383,13 +413,19 @@ export class IndirectRenderPlugin {
 
     public dispose(): void {
         if (this._renderObserver) {
-            this._scene.onAfterRenderObservable.remove(this._renderObserver);
+            const engAny = this._engine as any;
+            if (engAny.onEndFrameObservable) {
+                engAny.onEndFrameObservable.remove(this._renderObserver);
+            } else {
+                this._scene.onAfterRenderObservable.remove(this._renderObserver);
+            }
             this._renderObserver = null;
         }
+        this._cullingManager?.dispose();
+        this._cullingManager = null;
+        this._pipeline = null as any;
+        this._currentSampleCount = 0;
         this._uniformBuffer?.destroy();
-        this._visibleIndicesBuffer?.destroy();
-        this._vertexBuffer?.destroy();
-        this._indexBuffer?.destroy();
         this._depthTexture?.destroy();
     }
 }

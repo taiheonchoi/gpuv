@@ -1,115 +1,178 @@
-import { WebGPUEngine, StorageBuffer, Constants } from '@babylonjs/core';
+import { WebGPUEngine, Camera } from '@babylonjs/core';
 import { GlobalBufferManager } from './GlobalBufferManager';
+import cullingWgsl from '../shaders/culling.wgsl?raw';
 
 /**
- * Orchestrates the Zero-Latency GPU compute lifecycle mapping Frustum and Hi-Z Culling 
- * continuously without relying on Main Thread sync points.
+ * GPU frustum culling via two compute passes per frame:
+ *   1. resetCounts  — zero all indirect draw commands' instanceCount
+ *   2. cullInstances — test each instance against 6 frustum planes,
+ *      atomically write survivors into the per-command remap regions
+ *
+ * Runs on the same GPUCommandEncoder as the render pass, ensuring
+ * implicit barriers between compute → render.
  */
 export class ComputeCullingManager {
-    private _engine: WebGPUEngine;
     private _device: GPUDevice;
     private _bufferManager: GlobalBufferManager;
 
-    private _hizTexture!: GPUTexture;
+    private _resetPipeline!: GPUComputePipeline;
+    private _cullPipeline!: GPUComputePipeline;
+    private _bindGroupLayout!: GPUBindGroupLayout;
+    private _bindGroup: GPUBindGroup | null = null;
+    private _uniformBuffer!: GPUBuffer;
+    // 112 bytes: 6 planes × 16B + 4 u32
+    private _uniformData = new Float32Array(28);
 
-    // Shared Memory Segment routing atomic increments bounding strictly within VRAM
-    public visibleInstanceIndexBuffer!: StorageBuffer;
-    public boundingVolumeBuffer!: StorageBuffer;
-
-    // Pre-allocated zero buffer for clearing atomic counters (avoids per-frame GPU buffer creation)
-    private _zeroBuffer!: GPUBuffer;
-
-    private readonly MAX_INSTANCES = 1000000;
+    private _initialized = false;
 
     constructor(engine: WebGPUEngine) {
-        this._engine = engine;
-        this._device = (this._engine as any)._device;
+        this._device = (engine as any)._device as GPUDevice;
         this._bufferManager = GlobalBufferManager.getInstance();
-
-        this._initializeCullingBuffers();
-        this._initializeZeroBuffer();
     }
 
-    private _initializeZeroBuffer(): void {
-        this._zeroBuffer = this._device.createBuffer({
-            size: 4,
-            usage: GPUBufferUsage.COPY_SRC,
+    public initialize(): void {
+        const shaderModule = this._device.createShaderModule({
+            label: 'culling-compute',
+            code: cullingWgsl,
         });
+
+        this._bindGroupLayout = this._device.createBindGroupLayout({
+            label: 'culling-bgl',
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+            ],
+        });
+
+        const pipelineLayout = this._device.createPipelineLayout({
+            label: 'culling-pl',
+            bindGroupLayouts: [this._bindGroupLayout],
+        });
+
+        this._resetPipeline = this._device.createComputePipeline({
+            label: 'culling-reset',
+            layout: pipelineLayout,
+            compute: { module: shaderModule, entryPoint: 'resetCounts' },
+        });
+
+        this._cullPipeline = this._device.createComputePipeline({
+            label: 'culling-cull',
+            layout: pipelineLayout,
+            compute: { module: shaderModule, entryPoint: 'cullInstances' },
+        });
+
+        this._uniformBuffer = this._device.createBuffer({
+            label: 'culling-uniforms',
+            size: 112,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        this._initialized = true;
+        console.log('ComputeCullingManager: Initialized (resetCounts + cullInstances pipelines)');
     }
 
-    private _initializeCullingBuffers(): void {
-        const flags = Constants.BUFFER_CREATIONFLAG_READWRITE;
+    /** Must be called after GlobalBufferManager.finalizeDrawCommands() */
+    public rebuildBindGroup(): void {
+        if (!this._initialized) return;
 
-        // Stores the array of absolute Instance offsets matching elements that survive the culling shader
-        this.visibleInstanceIndexBuffer = new StorageBuffer(
-            this._engine,
-            this.MAX_INSTANCES * 4, // 1 Uint32 per instance 
-            flags
-        );
+        const bm = this._bufferManager;
+        const trsGpu = (bm.instanceTRSBuffer.getBuffer() as any).underlyingResource as GPUBuffer;
 
-        // Bounding Box Structure mapped against WGSL logic
-        // Center(3) + radius(1) + geometricError(1) + Padding(3) = 8 Floats (32 Bytes)
-        this.boundingVolumeBuffer = new StorageBuffer(
-            this._engine,
-            this.MAX_INSTANCES * 32,
-            flags
-        );
+        this._bindGroup = this._device.createBindGroup({
+            label: 'culling-bg',
+            layout: this._bindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: this._uniformBuffer } },
+                { binding: 1, resource: { buffer: trsGpu } },
+                { binding: 2, resource: { buffer: bm.indirectDrawGpuBuffer } },
+                { binding: 3, resource: { buffer: bm.visibleIndicesBuffer } },
+                { binding: 4, resource: { buffer: bm.instanceDrawCmdMapBuffer } },
+                { binding: 5, resource: { buffer: bm.drawCmdBaseOffsetsBuffer } },
+                { binding: 6, resource: { buffer: bm.meshBoundsBuffer } },
+            ],
+        });
+        console.log('ComputeCullingManager: Bind group rebuilt');
     }
 
     /**
-     * Resets the active atomic draw arguments count back to 0 prior to sequence mapping.
+     * Dispatch culling compute passes on the given encoder.
+     * Call BEFORE the render pass in the same command buffer.
      */
-    public resetIndirectCounters(commandEncoder: GPUCommandEncoder): void {
-        const indirectBuff = this._bufferManager.indirectDrawBuffer.getBuffer() as any;
+    public dispatchCulling(encoder: GPUCommandEncoder, camera: Camera): void {
+        if (!this._initialized || !this._bindGroup) return;
 
-        // Push performance trace group wrapper identifying sequence block inside the profiler
-        commandEncoder.pushDebugGroup("Reset_Indirect_Atomic_Counters");
+        const totalInstances = this._bufferManager.instanceCount;
+        const drawCmdCount = this._bufferManager.drawCommandCount;
+        if (totalInstances === 0 || drawCmdCount === 0) return;
 
-        // The indirect draw indexed buffer format structure:
-        // [0] indexCount
-        // [1] instanceCount  <-- Needs to be cleared to 0u
-        // [2] firstIndex
-        // [3] baseVertex
-        // [4] firstInstance
-        // Reuse pre-allocated zero buffer (default-initialized to 0) to avoid per-frame GPU buffer leak
-        commandEncoder.copyBufferToBuffer(
-            this._zeroBuffer, 0,
-            indirectBuff.underlyingResource as GPUBuffer, 4, // Byte offset 4 targets instanceCount
-            4
-        );
-        commandEncoder.popDebugGroup();
+        this._updateUniforms(camera, totalInstances, drawCmdCount);
+
+        // Pass 1: Reset all instanceCount to 0
+        const resetPass = encoder.beginComputePass({ label: 'cull-reset' });
+        resetPass.setPipeline(this._resetPipeline);
+        resetPass.setBindGroup(0, this._bindGroup);
+        resetPass.dispatchWorkgroups(Math.ceil(drawCmdCount / 64));
+        resetPass.end();
+
+        // Pass 2: Frustum cull each instance
+        const cullPass = encoder.beginComputePass({ label: 'cull-frustum' });
+        cullPass.setPipeline(this._cullPipeline);
+        cullPass.setBindGroup(0, this._bindGroup);
+        cullPass.dispatchWorkgroups(Math.ceil(totalInstances / 64));
+        cullPass.end();
     }
 
-    public executeCullingCompute(commandEncoder: GPUCommandEncoder): void {
-        commandEncoder.pushDebugGroup("Execute_Frustum_HiZ_Culling");
+    private _updateUniforms(camera: Camera, totalInstances: number, drawCmdCount: number): void {
+        // Extract 6 frustum planes from VP matrix (Gribb/Hartmann method)
+        const vp = camera.getTransformationMatrix();
+        const m = vp.toArray(); // Babylon row-major
 
-        // Typically set compute pass and bind uniforms and dispatch workload
-        // const computePass = commandEncoder.beginComputePass();
-        // computePass.setPipeline(this._cullingPipeline);
-        // computePass.setBindGroup(0, this._cullBindGroup);
-        // computePass.dispatchWorkgroups(Math.ceil(this.MAX_INSTANCES / 64)); // Align to 64 thread size block
-        // computePass.end();
+        // Plane extraction for WebGPU NDC (z in [0,1]):
+        // Left:   row3 + row0
+        // Right:  row3 - row0
+        // Bottom: row3 + row1
+        // Top:    row3 - row1
+        // Near:   row2          (z >= 0)
+        // Far:    row3 - row2   (z <= 1)
+        const planes: number[][] = [
+            [m[12]+m[0], m[13]+m[1], m[14]+m[2],  m[15]+m[3]],
+            [m[12]-m[0], m[13]-m[1], m[14]-m[2],  m[15]-m[3]],
+            [m[12]+m[4], m[13]+m[5], m[14]+m[6],  m[15]+m[7]],
+            [m[12]-m[4], m[13]-m[5], m[14]-m[6],  m[15]-m[7]],
+            [m[8],       m[9],       m[10],        m[11]],
+            [m[12]-m[8], m[13]-m[9], m[14]-m[10], m[15]-m[11]],
+        ];
 
-        commandEncoder.popDebugGroup();
-    }
-
-    public buildHiZPyramid(commandEncoder: GPUCommandEncoder, sourceDepth: GPUTexture): void {
-        commandEncoder.pushDebugGroup("Build_HiZ_Depth_Pyramid");
-        // Issue iterative layout generation utilizing textureLoad and textureStore across mip jumps
-        // For type safety against strict compilations:
-        if (this._hizTexture && sourceDepth) {
-            // Future command encoder mapping goes here.
+        for (let i = 0; i < 6; i++) {
+            const [a, b, c, d] = planes[i];
+            const len = Math.sqrt(a * a + b * b + c * c);
+            const inv = len > 1e-6 ? 1 / len : 0;
+            this._uniformData[i * 4 + 0] = a * inv;
+            this._uniformData[i * 4 + 1] = b * inv;
+            this._uniformData[i * 4 + 2] = c * inv;
+            this._uniformData[i * 4 + 3] = d * inv;
         }
-        commandEncoder.popDebugGroup();
+
+        const u32 = new Uint32Array(this._uniformData.buffer);
+        u32[24] = totalInstances;
+        u32[25] = drawCmdCount;
+        u32[26] = 0;
+        u32[27] = 0;
+
+        this._device.queue.writeBuffer(this._uniformBuffer, 0, this._uniformData);
     }
 
-    /**
-     * Releases all GPU resources (StorageBuffers and raw GPUBuffers).
-     * Must be called before engine teardown to prevent GPU memory leaks.
-     */
+    public get isReady(): boolean {
+        return this._initialized && this._bindGroup !== null;
+    }
+
     public dispose(): void {
-        this._zeroBuffer?.destroy();
-        this.visibleInstanceIndexBuffer?.dispose();
-        this.boundingVolumeBuffer?.dispose();
+        this._uniformBuffer?.destroy();
+        this._bindGroup = null;
     }
 }
